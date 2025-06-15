@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ORG_NAME: suyunjing-su
+  ORG_NAME: openlistteam
   IMAGE_NAME: openlist-git
   REGISTRY: ghcr.io
   ARTIFACT_NAME: 'binaries_docker_release'

@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ORG_NAME: cloudlinksu
+  ORG_NAME: openlistteam
   IMAGE_NAME: openlist
   REGISTRY: registry-1.docker.io
   DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
