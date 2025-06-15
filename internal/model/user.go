@@ -11,6 +11,7 @@ import (
 	"github.com/OpenListTeam/OpenList/pkg/utils/random"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/pkg/errors"
+	"github.com/alexedwards/argon2id"
 )
 
 const (
@@ -61,7 +62,24 @@ func (u *User) IsAdmin() bool {
 }
 
 func (u *User) ValidateRawPassword(password string) error {
+	if password == "" {
+		return errors.WithStack(errs.EmptyPassword)
+	}
+	if isArgon2Hash(u.PwdHash) {
+		match, err := argon2id.ComparePasswordAndHash(password, u.PwdHash)
+		if err != nil {
+			return errors.WithStack(err)
+		}
+		if !match {
+			return errors.WithStack(errs.WrongPassword)
+		}
+		return nil
+	}
 	return u.ValidatePwdStaticHash(StaticHash(password))
+}
+
+func isArgon2Hash(hash string) bool {
+	return len(hash) > 8 && hash[:9] == "$argon2id"
 }
 
 func (u *User) ValidatePwdStaticHash(pwdStaticHash string) error {
@@ -75,8 +93,12 @@ func (u *User) ValidatePwdStaticHash(pwdStaticHash string) error {
 }
 
 func (u *User) SetPassword(pwd string) *User {
-	u.Salt = random.String(16)
-	u.PwdHash = TwoHashPwd(pwd, u.Salt)
+	hash, err := argon2id.CreateHash(pwd, argon2id.DefaultParams)
+	if err != nil {
+		panic(fmt.Errorf("argon2id hashing failed: %w", err))
+	}
+	u.PwdHash = hash
+	u.Salt = "Openlist" // 暂不使用旧 salt，保留字段便于兼容老数据
 	u.PwdTS = time.Now().Unix()
 	return u
 }
@@ -177,5 +199,5 @@ func (u *User) WebAuthnCredentials() []webauthn.Credential {
 }
 
 func (u *User) WebAuthnIcon() string {
-	return "https://cdn.statically.io/gh/OpenListTeam/Logo/main/OpenList.svg"
+	return "https://fastly.jsdelivr.net/gh/OpenListTeam/Logo@master/OpenList.svg"
 }
