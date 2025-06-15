@@ -14,16 +14,13 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ORG_NAME: openlistteam
-  IMAGE_NAME: openlist-git
+  ORG_NAME: suyunjing-su
+  IMAGE_NAME: openlist-ggit
   REGISTRY: ghcr.io
   ARTIFACT_NAME: 'binaries_docker_release'
   RELEASE_PLATFORMS: 'linux/amd64,linux/arm64,linux/arm/v7,linux/386,linux/arm/v6,linux/s390x,linux/ppc64le,linux/riscv64'
   IMAGE_PUSH: ${{ github.event_name == 'push' }}
   IMAGE_TAGS_BETA: |
-    type=schedule
-    type=ref,event=branch
-    type=ref,event=tag
     type=ref,event=pr
     type=raw,value=beta,enable={{is_default_branch}}
 

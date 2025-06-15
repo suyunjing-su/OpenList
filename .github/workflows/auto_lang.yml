@@ -35,31 +35,31 @@ jobs:
         with:
           path: alist
 
-      - name: Checkout alist-web
+      - name: Checkout OpenList-Frontend
         uses: actions/checkout@v4
         with:
-          repository: 'alist-org/alist-web'
+          repository: 'OpenListTeam/OpenList-Frontend'
           ref: main
           persist-credentials: false
           fetch-depth: 0
-          path: alist-web
+          path: OpenList-Frontend
 
       - name: Generate lang
         run: |
-          cd alist
+          cd OpenList
           go run ./main.go lang
           cd ..
 
       - name: Copy lang file
         run: |
-          cp -f ./alist/lang/*.json ./alist-web/src/lang/en/ 2>/dev/null || :
+          cp -f ./OpenList/lang/*.json ./OpenList-Frontend/src/lang/en/ 2>/dev/null || :
 
       - name: Commit git
         run: |
           cd alist-web
           git add .
-          git config --local user.email "bot@nn.ci"
-          git config --local user.name "IlaBot"
+          git config --local user.email "bot@openlist.team"
+          git config --local user.name "The OpenList Bot"
           git commit -m "chore: auto update i18n file" -a 2>/dev/null || :
           cd ..
 
@@ -69,4 +69,4 @@ jobs:
           github_token: ${{ secrets.MY_TOKEN }}
           branch: main
           directory: alist-web
-          repository: alist-org/alist-web
+          repository: OpenListTeam/OpenList-Frontend
