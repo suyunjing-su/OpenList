@@ -58,8 +58,8 @@ jobs:
         run: |
           cd OpenList-Frontend
           git add .
-          git config --local user.email "bot@nn.ci"
-          git config --local user.name "IlaBot"
+          git config --local user.email "bot@openlist.team"
+          git config --local user.name "The OpenList Bot"
           git commit -m "chore: auto update i18n file" -a 2>/dev/null || :
           cd ..
 
