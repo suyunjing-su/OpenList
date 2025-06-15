@@ -100,7 +100,6 @@ jobs:
         if: env.IMAGE_PUSH == 'true'
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
           username: ${{ env.ORG_NAME }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
