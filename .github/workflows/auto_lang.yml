@@ -33,7 +33,7 @@ jobs:
       - name: Checkout alist
         uses: actions/checkout@v4
         with:
-          path: alist
+          path: OpenList
 
       - name: Checkout OpenList-Frontend
         uses: actions/checkout@v4
@@ -53,7 +53,7 @@ jobs:
       - name: Copy lang file
         run: |
           cp -f ./OpenList/lang/*.json ./OpenList-Frontend/src/lang/en/ 2>/dev/null || :
-
+          
       - name: Commit git
         run: |
           cd OpenList-Frontend
