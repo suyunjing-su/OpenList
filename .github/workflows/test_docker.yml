@@ -14,7 +14,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ORG_NAME: openlistteam
+##  ORG_NAME: openlistteam
+  ORG_NAME: suyunjing-su
+  ORG_NAME_1: cloudlinksu
   IMAGE_NAME: openlist-git
   IMAGE_NAME_DOCKERHUB: openlist
   REGISTRY: ghcr.io
@@ -114,7 +116,7 @@ jobs:
         if: env.IMAGE_PUSH == 'true'
         uses: docker/login-action@v3
         with:
-          username: ${{ env.ORG_NAME }}
+          username: ${{ env.ORG_NAME_1 }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Docker meta ghcr
@@ -130,7 +132,7 @@ jobs:
         id: meta-dockerhub
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY_DOCKERHUB }}/${{ env.ORG_NAME }}/${{ env.IMAGE_NAME_DOCKERHUB }}
+          images: ${{ env.REGISTRY_DOCKERHUB }}/${{ env.ORG_NAME_1 }}/${{ env.IMAGE_NAME_DOCKERHUB }}
           tags: ${{ env.IMAGE_TAGS_BETA }}
           flavor: |
             ${{ matrix.tag_favor }}
