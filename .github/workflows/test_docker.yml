@@ -20,7 +20,6 @@ env:
   IMAGE_NAME: openlist-git
   IMAGE_NAME_DOCKERHUB: openlist
   REGISTRY: ghcr.io
-  REGISTRY_DOCKERHUB: registry-1.docker.io
   DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
   ARTIFACT_NAME: 'binaries_docker_release'
   RELEASE_PLATFORMS: 'linux/amd64,linux/arm64,linux/arm/v7,linux/386,linux/arm/v6,linux/s390x,linux/ppc64le,linux/riscv64'
@@ -119,44 +118,25 @@ jobs:
           username: ${{ env.ORG_NAME_1 }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
-      - name: Docker meta ghcr
-        id: meta-ghcr
+      - name: Docker meta
+        id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/${{ env.IMAGE_NAME }}
+          images: |
+            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/${{ env.IMAGE_NAME }}
+            ${{ env.ORG_NAME_1 }}/${{ env.IMAGE_NAME_DOCKERHUB }}
           tags: ${{ env.IMAGE_TAGS_BETA }}
           flavor: |
             ${{ matrix.tag_favor }}
 
-      - name: Docker meta DockerHub
-        id: meta-dockerhub
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY_DOCKERHUB }}/${{ env.ORG_NAME_1 }}/${{ env.IMAGE_NAME_DOCKERHUB }}
-          tags: ${{ env.IMAGE_TAGS_BETA }}
-          flavor: |
-            ${{ matrix.tag_favor }}
-
-      - name: Build and push ghcr
-        id: docker_build_ghcr
+      - name: Build and push
+        id: docker_build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.ci
           push: ${{ env.IMAGE_PUSH == 'true' }}
           build-args: ${{ matrix.build_arg }}
-          tags: ${{ steps.meta-ghcr.outputs.tags }}
-          labels: ${{ steps.meta-ghcr.outputs.labels }}
-          platforms: ${{ env.RELEASE_PLATFORMS }}
-
-      - name: Build and push DockerHub
-        id: docker_build_dockerhub
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.ci
-          push: ${{ env.IMAGE_PUSH == 'true' }}
-          build-args: ${{ matrix.build_arg }}
-          tags: ${{ steps.meta-dockerhub.outputs.tags }}
-          labels: ${{ steps.meta-dockerhub.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           platforms: ${{ env.RELEASE_PLATFORMS }}
