@@ -63,41 +63,32 @@ func moveBetween2Storages(t *MoveTask, srcStorage, dstStorage driver.Driver, src
 	if err != nil {
 		return errors.WithMessagef(err, "failed get src [%s] file", srcObjPath)
 	}
-	
+
 	if srcObj.IsDir() {
-		t.Status = "src object is dir, listing objs"
+		dstObjPath := stdpath.Join(dstDirPath, srcObj.GetName())
+
+		t.Status = "creating destination directory"
+		err := op.MakeDir(t.Ctx(), dstStorage, dstObjPath)
+		if err != nil && !errors.Is(err, errs.ObjectExist) {
+			return errors.WithMessagef(err, "failed to create destination directory [%s]", dstObjPath)
+		}
+
+		t.Status = "listing children"
 		objs, err := op.List(t.Ctx(), srcStorage, srcObjPath, model.ListArgs{})
 		if err != nil {
 			return errors.WithMessagef(err, "failed list src [%s] objs", srcObjPath)
 		}
-		
-		dstObjPath := stdpath.Join(dstDirPath, srcObj.GetName())
-		t.Status = "creating destination directory"
-		err = op.MakeDir(t.Ctx(), dstStorage, dstObjPath)
-		if err != nil {
-			// Check if this is an upload-related error and provide a clearer message
-			if errors.Is(err, errs.UploadNotSupported) {
-				return errors.WithMessagef(err, "destination storage [%s] does not support creating directories", dstStorage.GetStorage().MountPath)
-			}
-			return errors.WithMessagef(err, "failed to create destination directory [%s] in storage [%s]", dstObjPath, dstStorage.GetStorage().MountPath)
-		}
-		
+
 		for _, obj := range objs {
 			if utils.IsCanceled(t.Ctx()) {
 				return nil
 			}
-			srcSubObjPath := stdpath.Join(srcObjPath, obj.GetName())
-			MoveTaskManager.Add(&MoveTask{
-				TaskExtension: task.TaskExtension{
-					Creator: t.GetCreator(),
-				},
-				srcStorage:   srcStorage,
-				dstStorage:   dstStorage,
-				SrcObjPath:   srcSubObjPath,
-				DstDirPath:   dstObjPath,
-				SrcStorageMp: srcStorage.GetStorage().MountPath,
-				DstStorageMp: dstStorage.GetStorage().MountPath,
-			})
+			subSrcPath := stdpath.Join(srcObjPath, obj.GetName())
+			// 递归调用 moveBetween2Storages
+			err := moveBetween2Storages(t, srcStorage, dstStorage, subSrcPath, dstObjPath)
+			if err != nil {
+				return err
+			}
 		}
 
 		t.Status = "cleaning up source directory"
@@ -112,6 +103,7 @@ func moveBetween2Storages(t *MoveTask, srcStorage, dstStorage driver.Driver, src
 		return moveFileBetween2Storages(t, srcStorage, dstStorage, srcObjPath, dstDirPath)
 	}
 }
+
 
 
 func moveFileBetween2Storages(tsk *MoveTask, srcStorage, dstStorage driver.Driver, srcFilePath, dstDirPath string) error {
