@@ -84,7 +84,7 @@ func moveBetween2Storages(t *MoveTask, srcStorage, dstStorage driver.Driver, src
 		// 清理空目录（源目录）
 		t.Status = "cleaning up source directory"
 		err = op.Remove(t.Ctx(), srcStorage, srcObjPath)
-		if err != nil && !errors.Is(err, errs.NotExist) {
+		if err != nil {
 			t.Status = "completed (source directory cleanup pending)"
 		} else {
 			t.Status = "completed"
@@ -122,7 +122,7 @@ func addMoveTasksRecursively(t *MoveTask, srcStorage, dstStorage driver.Driver, 
 
 			// 删除源子目录
 			err = op.Remove(t.Ctx(), srcStorage, srcSubPath)
-			if err != nil && !errors.Is(err, errs.NotExist) {
+			if err != nil {
 				t.Status = fmt.Sprintf("warning: failed to cleanup dir [%s]", srcSubPath)
 			}
 		} else {
