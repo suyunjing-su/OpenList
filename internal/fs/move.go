@@ -68,7 +68,7 @@ func moveBetween2Storages(t *MoveTask, srcStorage, dstStorage driver.Driver, src
 
 		t.Status = "creating destination directory"
 		err = op.MakeDir(t.Ctx(), dstStorage, dstObjPath)
-		if err != nil && !errors.Is(err, errs.Exist) {
+		if err != nil {
 			if errors.Is(err, errs.UploadNotSupported) {
 				return errors.WithMessagef(err, "destination storage [%s] does not support creating directories", dstStorage.GetStorage().MountPath)
 			}
@@ -110,7 +110,7 @@ func addMoveTasksRecursively(t *MoveTask, srcStorage, dstStorage driver.Driver, 
 
 		if obj.IsDir() {
 			err := op.MakeDir(t.Ctx(), dstStorage, dstSubPath)
-			if err != nil && !errors.Is(err, errs.Exist) {
+			if err != nil {
 				return errors.WithMessagef(err, "failed to create directory [%s] in destination", dstSubPath)
 			}
 
