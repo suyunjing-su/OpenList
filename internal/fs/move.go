@@ -142,7 +142,7 @@ func moveFileBetween2Storages(tsk *MoveTask, srcStorage, dstStorage driver.Drive
 	tsk.Status = "verifying file in destination"
 
 	// check target files
-	dstFilePath := stdpath.Join(dstDirPath, utils.PathBase(srcFilePath))
+	dstFilePath := stdpath.Join(dstDirPath, stdpath.Base(srcFilePath))
 	const maxRetries = 3
 	const retryInterval = time.Second
 	var checkErr error
