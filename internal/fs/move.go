@@ -56,7 +56,6 @@ func (t *MoveTask) Run() error {
 
 var MoveTaskManager *tache.Manager[*MoveTask]
 
-
 func moveBetween2Storages(t *MoveTask, srcStorage, dstStorage driver.Driver, srcObjPath, dstDirPath string) error {
 	t.Status = "getting src object"
 	srcObj, err := op.Get(t.Ctx(), srcStorage, srcObjPath)
@@ -68,32 +67,24 @@ func moveBetween2Storages(t *MoveTask, srcStorage, dstStorage driver.Driver, src
 		dstObjPath := stdpath.Join(dstDirPath, srcObj.GetName())
 
 		t.Status = "creating destination directory"
-		err := op.MakeDir(t.Ctx(), dstStorage, dstObjPath)
-		if err != nil && !errors.Is(err, errs.ObjectExist) {
-			return errors.WithMessagef(err, "failed to create destination directory [%s]", dstObjPath)
+		err = op.MakeDir(t.Ctx(), dstStorage, dstObjPath)
+		if err != nil && !errors.Is(err, errs.Exist) {
+			if errors.Is(err, errs.UploadNotSupported) {
+				return errors.WithMessagef(err, "destination storage [%s] does not support creating directories", dstStorage.GetStorage().MountPath)
+			}
+			return errors.WithMessagef(err, "failed to create destination directory [%s] in storage [%s]", dstObjPath, dstStorage.GetStorage().MountPath)
 		}
 
-		t.Status = "listing children"
-		objs, err := op.List(t.Ctx(), srcStorage, srcObjPath, model.ListArgs{})
+		t.Status = "recursively adding move tasks"
+		err = addMoveTasksRecursively(t, srcStorage, dstStorage, srcObjPath, dstObjPath)
 		if err != nil {
-			return errors.WithMessagef(err, "failed list src [%s] objs", srcObjPath)
+			return err
 		}
 
-		for _, obj := range objs {
-			if utils.IsCanceled(t.Ctx()) {
-				return nil
-			}
-			subSrcPath := stdpath.Join(srcObjPath, obj.GetName())
-			// 递归调用 moveBetween2Storages
-			err := moveBetween2Storages(t, srcStorage, dstStorage, subSrcPath, dstObjPath)
-			if err != nil {
-				return err
-			}
-		}
-
+		// 清理空目录（源目录）
 		t.Status = "cleaning up source directory"
 		err = op.Remove(t.Ctx(), srcStorage, srcObjPath)
-		if err != nil {
+		if err != nil && !errors.Is(err, errs.NotExist) {
 			t.Status = "completed (source directory cleanup pending)"
 		} else {
 			t.Status = "completed"
@@ -104,7 +95,52 @@ func moveBetween2Storages(t *MoveTask, srcStorage, dstStorage driver.Driver, src
 	}
 }
 
+func addMoveTasksRecursively(t *MoveTask, srcStorage, dstStorage driver.Driver, srcPath, dstPath string) error {
+	objs, err := op.List(t.Ctx(), srcStorage, srcPath, model.ListArgs{})
+	if err != nil {
+		return errors.WithMessagef(err, "failed to list directory [%s]", srcPath)
+	}
 
+	for _, obj := range objs {
+		if utils.IsCanceled(t.Ctx()) {
+			return nil
+		}
+		srcSubPath := stdpath.Join(srcPath, obj.GetName())
+		dstSubPath := stdpath.Join(dstPath, obj.GetName())
+
+		if obj.IsDir() {
+			err := op.MakeDir(t.Ctx(), dstStorage, dstSubPath)
+			if err != nil && !errors.Is(err, errs.Exist) {
+				return errors.WithMessagef(err, "failed to create directory [%s] in destination", dstSubPath)
+			}
+
+			// 递归处理子目录
+			err = addMoveTasksRecursively(t, srcStorage, dstStorage, srcSubPath, dstSubPath)
+			if err != nil {
+				return err
+			}
+
+			// 删除源子目录
+			err = op.Remove(t.Ctx(), srcStorage, srcSubPath)
+			if err != nil && !errors.Is(err, errs.NotExist) {
+				t.Status = fmt.Sprintf("warning: failed to cleanup dir [%s]", srcSubPath)
+			}
+		} else {
+			MoveTaskManager.Add(&MoveTask{
+				TaskExtension: task.TaskExtension{
+					Creator: t.GetCreator(),
+				},
+				srcStorage:   srcStorage,
+				dstStorage:   dstStorage,
+				SrcObjPath:   srcSubPath,
+				DstDirPath:   dstPath,
+				SrcStorageMp: srcStorage.GetStorage().MountPath,
+				DstStorageMp: dstStorage.GetStorage().MountPath,
+			})
+		}
+	}
+	return nil
+}
 
 func moveFileBetween2Storages(tsk *MoveTask, srcStorage, dstStorage driver.Driver, srcFilePath, dstDirPath string) error {
 	tsk.Status = "copying file to destination"

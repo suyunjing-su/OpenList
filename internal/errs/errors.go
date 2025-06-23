@@ -19,7 +19,6 @@ var (
 	StorageNotFound  = errors.New("storage not found")
 	StreamIncomplete = errors.New("upload/download stream incomplete, possible network issue")
 	StreamPeekFail   = errors.New("StreamPeekFail")
-	ObjectExist = errors.New("object already exists")
 
 	UnknownArchiveFormat      = errors.New("unknown archive format")
 	WrongArchivePassword      = errors.New("wrong archive password")
