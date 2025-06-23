@@ -116,7 +116,7 @@ func moveBetween2Storages(t *MoveTask, srcStorage, dstStorage driver.Driver, src
 
 func moveFileBetween2Storages(tsk *MoveTask, srcStorage, dstStorage driver.Driver, srcFilePath, dstDirPath string) error {
 	tsk.Status = "copying file to destination"
-	
+
 	copyTask := &CopyTask{
 		TaskExtension: task.TaskExtension{
 			Creator: tsk.GetCreator(),
@@ -128,33 +128,45 @@ func moveFileBetween2Storages(tsk *MoveTask, srcStorage, dstStorage driver.Drive
 		SrcStorageMp: srcStorage.GetStorage().MountPath,
 		DstStorageMp: dstStorage.GetStorage().MountPath,
 	}
-	
-
 	copyTask.SetCtx(tsk.Ctx())
-	
 
 	err := copyBetween2Storages(copyTask, srcStorage, dstStorage, srcFilePath, dstDirPath)
 	if err != nil {
-		// Check if this is an upload-related error and provide a clearer message
 		if errors.Is(err, errs.UploadNotSupported) {
 			return errors.WithMessagef(err, "destination storage [%s] does not support file uploads", dstStorage.GetStorage().MountPath)
 		}
 		return errors.WithMessagef(err, "failed to copy [%s] to destination storage [%s]", srcFilePath, dstStorage.GetStorage().MountPath)
 	}
-	
+
 	tsk.SetProgress(50)
-	
+	tsk.Status = "verifying file in destination"
+
+	// check target files
+	dstFilePath := stdpath.Join(dstDirPath, utils.PathBase(srcFilePath))
+	const maxRetries = 3
+	const retryInterval = time.Second
+	var checkErr error
+	for i := 0; i < maxRetries; i++ {
+		_, checkErr = op.Get(tsk.Ctx(), dstStorage, dstFilePath)
+		if checkErr == nil {
+			break
+		}
+		time.Sleep(retryInterval)
+	}
+	if checkErr != nil {
+		return errors.WithMessagef(checkErr, "file not found in destination [%s] after copy", dstFilePath)
+	}
+
 	tsk.Status = "deleting source file"
 	err = op.Remove(tsk.Ctx(), srcStorage, srcFilePath)
 	if err != nil {
 		return errors.WithMessagef(err, "failed to delete src [%s] file from storage [%s] after successful copy", srcFilePath, srcStorage.GetStorage().MountPath)
 	}
-	
+
 	tsk.SetProgress(100)
 	tsk.Status = "completed"
 	return nil
 }
-
 
 func _move(ctx context.Context, srcObjPath, dstDirPath string, lazyCache ...bool) (task.TaskExtensionInfo, error) {
 	srcStorage, srcObjActualPath, err := op.GetStorageAndActualPath(srcObjPath)
