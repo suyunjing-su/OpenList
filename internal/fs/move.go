@@ -67,12 +67,15 @@ func moveBetween2Storages(t *MoveTask, srcStorage, dstStorage driver.Driver, src
 	}
 
 	if srcObj.IsDir() {
-		t.Status = "creating destination directory"
-		dstObjPath := stdpath.Join(dstDirPath, srcObj.GetName())
-		err = op.MakeDir(t.Ctx(), dstStorage, dstObjPath)
-		if err != nil && !errors.Is(err, errs.FileExisted) {
-			return errors.WithMessagef(err, "failed to create destination directory [%s]", dstObjPath)
-		}
+        t.Status = "creating destination directory"
+        err = op.MakeDir(t.Ctx(), dstStorage, dstObjPath)
+        if err != nil {
+            // 如果目标存储不支持建目录，返回更友好的提示
+            if errors.Is(err, errs.UploadNotSupported) {
+                return errors.WithMessagef(err, "destination storage [%s] does not support creating directories", dstStorage.GetStorage().MountPath)
+            }
+            return errors.WithMessagef(err, "failed to create destination directory [%s] in storage [%s]", dstObjPath, dstStorage.GetStorage().MountPath)
+        }
 
 		t.Status = "listing source directory"
 		objs, err := op.List(t.Ctx(), srcStorage, srcObjPath, model.ListArgs{})
