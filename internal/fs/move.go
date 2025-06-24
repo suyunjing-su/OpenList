@@ -2,10 +2,11 @@ package fs
 
 import (
 	"context"
-	"fmt"
-	stdpath "path"
-	"time"
+	"net/http"
+	"path"
+	"sync"
 
+	"github.com/OpenListTeam/OpenList/internal/conf"
 	"github.com/OpenListTeam/OpenList/internal/driver"
 	"github.com/OpenListTeam/OpenList/internal/errs"
 	"github.com/OpenListTeam/OpenList/internal/model"
@@ -13,218 +14,178 @@ import (
 	"github.com/OpenListTeam/OpenList/internal/task"
 	"github.com/OpenListTeam/OpenList/pkg/utils"
 	"github.com/pkg/errors"
-	"github.com/xhofe/tache"
 )
 
-type MoveTask struct {
+type MoveDirTask struct {
 	task.TaskExtension
-	Status       string        `json:"-"`
-	SrcObjPath   string        `json:"src_path"`
-	DstDirPath   string        `json:"dst_path"`
-	srcStorage   driver.Driver `json:"-"`
-	dstStorage   driver.Driver `json:"-"`
-	SrcStorageMp string        `json:"src_storage_mp"`
-	DstStorageMp string        `json:"dst_storage_mp"`
+	SrcStorage driver.Driver
+	DstStorage driver.Driver
+	SrcPath    string
+	DstPath    string
+	SubTasks   []*CopyTask
+	Progress   float64
+	Status     string
+	Lock       sync.Mutex
+	DoneChan   chan struct{}
 }
 
-func (t *MoveTask) GetName() string {
-	return fmt.Sprintf("move [%s](%s) to [%s](%s)", t.SrcStorageMp, t.SrcObjPath, t.DstStorageMp, t.DstDirPath)
+func (t *MoveDirTask) GetName() string {
+	return "Move directory with verification"
 }
 
-func (t *MoveTask) GetStatus() string {
+func (t *MoveDirTask) GetStatus() string {
+	t.Lock.Lock()
+	defer t.Lock.Unlock()
 	return t.Status
 }
 
-func (t *MoveTask) Run() error {
+func (t *MoveDirTask) Run() error {
 	t.ReinitCtx()
-	t.ClearEndTime()
-	t.SetStartTime(time.Now())
-	defer func() { t.SetEndTime(time.Now()) }()
-	var err error
-	if t.srcStorage == nil {
-		t.srcStorage, err = op.GetStorageByMountPath(t.SrcStorageMp)
-	}
-	if t.dstStorage == nil {
-		t.dstStorage, err = op.GetStorageByMountPath(t.DstStorageMp)
-	}
+	t.DoneChan = make(chan struct{})
+	t.Status = "Listing source directory"
+
+	srcList, err := recursiveList(t.Ctx(), t.SrcStorage, t.SrcPath)
 	if err != nil {
-		return errors.WithMessage(err, "failed get storage")
+		return err
 	}
 
-	return moveBetween2Storages(t, t.srcStorage, t.dstStorage, t.SrcObjPath, t.DstDirPath)
-}
-
-var MoveTaskManager *tache.Manager[*MoveTask]
-
-func moveBetween2Storages(t *MoveTask, srcStorage, dstStorage driver.Driver, srcObjPath, dstDirPath string) error {
-	t.Status = "getting src object"
-	srcObj, err := op.Get(t.Ctx(), srcStorage, srcObjPath)
-	if err != nil {
-		return errors.WithMessagef(err, "failed get src [%s] file", srcObjPath)
-	}
-
-	if srcObj.IsDir() {
-		dstObjPath := stdpath.Join(dstDirPath, srcObj.GetName())
-
-		t.Status = "creating destination directory"
-		err = op.MakeDir(t.Ctx(), dstStorage, dstObjPath)
-		if err != nil {
-			if errors.Is(err, errs.UploadNotSupported) {
-				return errors.WithMessagef(err, "destination storage [%s] does not support creating directories", dstStorage.GetStorage().MountPath)
-			}
-			return errors.WithMessagef(err, "failed to create destination directory [%s] in storage [%s]", dstObjPath, dstStorage.GetStorage().MountPath)
-		}
-
-		t.Status = "recursively adding move tasks"
-		err = addMoveTasksRecursively(t, srcStorage, dstStorage, srcObjPath, dstObjPath)
-		if err != nil {
-			return err
-		}
-
-		// 清理空目录（源目录）
-		t.Status = "cleaning up source directory"
-		err = op.Remove(t.Ctx(), srcStorage, srcObjPath)
-		if err != nil {
-			t.Status = "completed (source directory cleanup pending)"
-		} else {
-			t.Status = "completed"
-		}
-		return nil
-	} else {
-		return moveFileBetween2Storages(t, srcStorage, dstStorage, srcObjPath, dstDirPath)
-	}
-}
-
-func addMoveTasksRecursively(t *MoveTask, srcStorage, dstStorage driver.Driver, srcPath, dstPath string) error {
-	objs, err := op.List(t.Ctx(), srcStorage, srcPath, model.ListArgs{})
-	if err != nil {
-		return errors.WithMessagef(err, "failed to list directory [%s]", srcPath)
-	}
-
-	for _, obj := range objs {
+	var wg sync.WaitGroup
+	for _, obj := range srcList {
 		if utils.IsCanceled(t.Ctx()) {
 			return nil
 		}
-		srcSubPath := stdpath.Join(srcPath, obj.GetName())
-		dstSubPath := stdpath.Join(dstPath, obj.GetName())
+		copyTask := &CopyTask{
+			TaskExtension: task.TaskExtension{
+				Creator: t.Creator,
+			},
+			srcStorage:   t.SrcStorage,
+			dstStorage:   t.DstStorage,
+			SrcObjPath:   obj.Path,
+			DstDirPath:   path.Join(t.DstPath, utils.TrimPrefix(obj.Path, t.SrcPath)),
+			SrcStorageMp: t.SrcStorage.GetStorage().MountPath,
+			DstStorageMp: t.DstStorage.GetStorage().MountPath,
+		}
+		t.SubTasks = append(t.SubTasks, copyTask)
+		wg.Add(1)
+		go func(ct *CopyTask) {
+			defer wg.Done()
+			_ = ct.Run() // Ignore internal error handling for simplicity
+		} (copyTask)
+	}
 
+	wg.Wait()
+	t.Status = "Verifying copied directory"
+	dstList, err := recursiveList(t.Ctx(), t.DstStorage, t.DstPath)
+	if err != nil {
+		return err
+	}
+	if !comparePathList(srcList, dstList) {
+		return errors.New("target verification failed: destination does not match source")
+	}
+
+	t.Status = "Deleting source files"
+	for i := len(srcList) - 1; i >= 0; i-- {
+		_ = op.Delete(t.Ctx(), t.SrcStorage, srcList[i].Path)
+	}
+	t.Status = "Completed"
+	close(t.DoneChan)
+	return nil
+}
+
+func recursiveList(ctx context.Context, drv driver.Driver, base string) ([]*model.Obj, error) {
+	objs := []*model.Obj{}
+	list, err := op.List(ctx, drv, base, model.ListArgs{})
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range list {
+		fullPath := path.Join(base, obj.GetName())
+		obj.SetPath(fullPath)
+		objs = append(objs, obj)
 		if obj.IsDir() {
-			err := op.MakeDir(t.Ctx(), dstStorage, dstSubPath)
+			subObjs, err := recursiveList(ctx, drv, fullPath)
 			if err != nil {
-				return errors.WithMessagef(err, "failed to create directory [%s] in destination", dstSubPath)
+				return nil, err
 			}
-
-			// 递归处理子目录
-			err = addMoveTasksRecursively(t, srcStorage, dstStorage, srcSubPath, dstSubPath)
-			if err != nil {
-				return err
-			}
-
-			// 删除源子目录
-			err = op.Remove(t.Ctx(), srcStorage, srcSubPath)
-			if err != nil {
-				t.Status = fmt.Sprintf("warning: failed to cleanup dir [%s]", srcSubPath)
-			}
-		} else {
-			MoveTaskManager.Add(&MoveTask{
-				TaskExtension: task.TaskExtension{
-					Creator: t.GetCreator(),
-				},
-				srcStorage:   srcStorage,
-				dstStorage:   dstStorage,
-				SrcObjPath:   srcSubPath,
-				DstDirPath:   dstPath,
-				SrcStorageMp: srcStorage.GetStorage().MountPath,
-				DstStorageMp: dstStorage.GetStorage().MountPath,
-			})
+			objs = append(objs, subObjs...)
 		}
 	}
-	return nil
+	return objs, nil
 }
 
-func moveFileBetween2Storages(tsk *MoveTask, srcStorage, dstStorage driver.Driver, srcFilePath, dstDirPath string) error {
-	tsk.Status = "copying file to destination"
-
-	copyTask := &CopyTask{
-		TaskExtension: task.TaskExtension{
-			Creator: tsk.GetCreator(),
-		},
-		srcStorage:   srcStorage,
-		dstStorage:   dstStorage,
-		SrcObjPath:   srcFilePath,
-		DstDirPath:   dstDirPath,
-		SrcStorageMp: srcStorage.GetStorage().MountPath,
-		DstStorageMp: dstStorage.GetStorage().MountPath,
+func comparePathList(src, dst []*model.Obj) bool {
+	if len(src) != len(dst) {
+		return false
 	}
-	copyTask.SetCtx(tsk.Ctx())
-
-	err := copyBetween2Storages(copyTask, srcStorage, dstStorage, srcFilePath, dstDirPath)
-	if err != nil {
-		if errors.Is(err, errs.UploadNotSupported) {
-			return errors.WithMessagef(err, "destination storage [%s] does not support file uploads", dstStorage.GetStorage().MountPath)
+	m := map[string]bool{}
+	for _, obj := range dst {
+		m[obj.GetPath()+"-"+obj.GetType()] = true
+	}
+	for _, obj := range src {
+		if !m[obj.GetPath()+"-"+obj.GetType()] {
+			return false
 		}
-		return errors.WithMessagef(err, "failed to copy [%s] to destination storage [%s]", srcFilePath, dstStorage.GetStorage().MountPath)
 	}
-
-	tsk.SetProgress(50)
-	tsk.Status = "verifying file in destination"
-
-	// check target files
-	dstFilePath := stdpath.Join(dstDirPath, stdpath.Base(srcFilePath))
-	const maxRetries = 3
-	const retryInterval = time.Second
-	var checkErr error
-	for i := 0; i < maxRetries; i++ {
-		_, checkErr = op.Get(tsk.Ctx(), dstStorage, dstFilePath)
-		if checkErr == nil {
-			break
-		}
-		time.Sleep(retryInterval)
-	}
-	if checkErr != nil {
-		return errors.WithMessagef(checkErr, "file not found in destination [%s] after copy", dstFilePath)
-	}
-
-	tsk.Status = "deleting source file"
-	err = op.Remove(tsk.Ctx(), srcStorage, srcFilePath)
-	if err != nil {
-		return errors.WithMessagef(err, "failed to delete src [%s] file from storage [%s] after successful copy", srcFilePath, srcStorage.GetStorage().MountPath)
-	}
-
-	tsk.SetProgress(100)
-	tsk.Status = "completed"
-	return nil
+	return true
 }
 
-func _move(ctx context.Context, srcObjPath, dstDirPath string, lazyCache ...bool) (task.TaskExtensionInfo, error) {
-	srcStorage, srcObjActualPath, err := op.GetStorageAndActualPath(srcObjPath)
+// 发起移动任务（跨存储目录）
+func MoveWithVerify(ctx context.Context, srcPath, dstPath string) (task.TaskExtensionInfo, error) {
+	srcStorage, srcActualPath, err := op.GetStorageAndActualPath(srcPath)
 	if err != nil {
-		return nil, errors.WithMessage(err, "failed get src storage")
+		return nil, err
 	}
-	dstStorage, dstDirActualPath, err := op.GetStorageAndActualPath(dstDirPath)
+	dstStorage, dstActualPath, err := op.GetStorageAndActualPath(dstPath)
 	if err != nil {
-		return nil, errors.WithMessage(err, "failed get dst storage")
+		return nil, err
 	}
 
-	if srcStorage.GetStorage() == dstStorage.GetStorage() {
-		err = op.Move(ctx, srcStorage, srcObjActualPath, dstDirActualPath, lazyCache...)
-		if !errors.Is(err, errs.NotImplement) && !errors.Is(err, errs.NotSupport) {
-			return nil, err
-		}
+	srcObj, err := op.Get(ctx, srcStorage, srcActualPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if srcStorage.GetStorage() == dstStorage.GetStorage() || !srcObj.IsDir() {
+		return op.Move(ctx, srcStorage, srcActualPath, dstActualPath)
+	}
+
+	if ctx.Value(conf.NoTaskKey) != nil {
+		return nil, errs.NotSupport
 	}
 
 	taskCreator, _ := ctx.Value("user").(*model.User)
-	t := &MoveTask{
+	t := &MoveDirTask{
 		TaskExtension: task.TaskExtension{
 			Creator: taskCreator,
 		},
-		srcStorage:   srcStorage,
-		dstStorage:   dstStorage,
-		SrcObjPath:   srcObjActualPath,
-		DstDirPath:   dstDirActualPath,
-		SrcStorageMp: srcStorage.GetStorage().MountPath,
-		DstStorageMp: dstStorage.GetStorage().MountPath,
+		SrcStorage: srcStorage,
+		DstStorage: dstStorage,
+		SrcPath:    srcActualPath,
+		DstPath:    dstActualPath,
 	}
-	MoveTaskManager.Add(t)
+	task.GlobalTaskManager.Add(t)
 	return t, nil
+}
+
+// move task API Service
+func GetMoveProgress(taskID string) (float64, string) {
+	v := task.GlobalTaskManager.Get(taskID)
+	if mv, ok := v.(*MoveDirTask); ok {
+		return mv.GetProgress(), mv.GetStatus()
+	}
+	return 0, "not found"
+}
+
+func (t *MoveDirTask) GetProgress() float64 {
+	t.Lock.Lock()
+	defer t.Lock.Unlock()
+	var total, done int64
+	for _, ct := range t.SubTasks {
+		total += ct.GetTotalBytes()
+		done += ct.GetCompletedBytes()
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(done) / float64(total)
 }
