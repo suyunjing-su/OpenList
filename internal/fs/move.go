@@ -2,136 +2,135 @@ package fs
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
-	"path"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/OpenListTeam/OpenList/internal/conf"
 	"github.com/OpenListTeam/OpenList/internal/driver"
-	"github.com/OpenListTeam/OpenList/internal/errs"
 	"github.com/OpenListTeam/OpenList/internal/model"
 	"github.com/OpenListTeam/OpenList/internal/op"
 	"github.com/OpenListTeam/OpenList/internal/task"
-	"github.com/OpenListTeam/OpenList/pkg/utils"
-	"github.com/pkg/errors"
+	"github.com/xhofe/tache"
 )
 
-type MoveDirTask struct {
+type MoveTask struct {
 	task.TaskExtension
-	SrcStorage driver.Driver
-	DstStorage driver.Driver
-	SrcPath    string
-	DstPath    string
-	SubTasks   []*CopyTask
-	Progress   float64
-	Status     string
-	Lock       sync.Mutex
-	DoneChan   chan struct{}
+	Status       string
+	Progress     int64
+	Total        int64
+	SrcObjs      []model.Obj
+	DstDir       string
+	SrcStorageMp string
+	DstStorageMp string
+	srcStorage   driver.Driver
+	dstStorage   driver.Driver
+	mu           sync.Mutex
 }
 
-func (t *MoveDirTask) GetName() string {
-	return "Move directory with verification"
+func (t *MoveTask) GetName() string {
+	return fmt.Sprintf("move [%s] to [%s]", t.SrcStorageMp, t.DstStorageMp)
 }
-
-func (t *MoveDirTask) GetStatus() string {
-	t.Lock.Lock()
-	defer t.Lock.Unlock()
+func (t *MoveTask) GetStatus() string {
 	return t.Status
 }
-
-func (t *MoveDirTask) Run() error {
-	t.ReinitCtx()
-	t.DoneChan = make(chan struct{})
-	t.Status = "Listing source directory"
-
-	srcList, err := recursiveList(t.Ctx(), t.SrcStorage, t.SrcPath)
-	if err != nil {
-		return err
+func (t *MoveTask) GetProgress() float64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.Total == 0 {
+		return 0
 	}
+	return float64(t.Progress) / float64(t.Total)
+}
+
+func (t *MoveTask) Run() error {
+	t.ReinitCtx()
+	t.ClearEndTime()
+	t.SetStartTime(time.Now())
+	defer func() { t.SetEndTime(time.Now()) }()
+
+	if t.srcStorage == nil {
+		var err error
+		t.srcStorage, err = op.GetStorageByMountPath(t.SrcStorageMp)
+		if err != nil {
+			return err
+		}
+	}
+	if t.dstStorage == nil {
+		var err error
+		t.dstStorage, err = op.GetStorageByMountPath(t.DstStorageMp)
+		if err != nil {
+			return err
+		}
+	}
+
+	t.Total = int64(len(t.SrcObjs))
 
 	var wg sync.WaitGroup
-	for _, obj := range srcList {
-		if utils.IsCanceled(t.Ctx()) {
-			return nil
-		}
-		copyTask := &CopyTask{
-			TaskExtension: task.TaskExtension{
-				Creator: t.Creator,
-			},
-			srcStorage:   t.SrcStorage,
-			dstStorage:   t.DstStorage,
-			SrcObjPath:   obj.Path,
-			DstDirPath:   path.Join(t.DstPath, utils.TrimPrefix(obj.Path, t.SrcPath)),
-			SrcStorageMp: t.SrcStorage.GetStorage().MountPath,
-			DstStorageMp: t.DstStorage.GetStorage().MountPath,
-		}
-		t.SubTasks = append(t.SubTasks, copyTask)
+	var mu sync.Mutex
+	var errs []error
+
+	for _, obj := range t.SrcObjs {
 		wg.Add(1)
-		go func(ct *CopyTask) {
+		go func(obj model.Obj) {
 			defer wg.Done()
-			_ = ct.Run() // Ignore internal error handling for simplicity
-		} (copyTask)
-	}
+			srcPath := obj.GetPath()
+			dstPath := strings.TrimSuffix(t.DstDir, "/") + "/" + strings.TrimPrefix(srcPath, strings.TrimSuffix(t.SrcObjs[0].GetPath(), obj.GetName()))
 
+			copyTask := &CopyTask{
+				TaskExtension: task.TaskExtension{
+					Creator: t.GetCreator(),
+				},
+				srcStorage:   t.srcStorage,
+				dstStorage:   t.dstStorage,
+				SrcObjPath:   srcPath,
+				DstDirPath:   dstPath,
+				SrcStorageMp: t.SrcStorageMp,
+				DstStorageMp: t.DstStorageMp,
+			}
+			if err := copyTask.Run(); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+				return
+			}
+			t.mu.Lock()
+			t.Progress++
+			t.mu.Unlock()
+		}(obj)
+	}
 	wg.Wait()
-	t.Status = "Verifying copied directory"
-	dstList, err := recursiveList(t.Ctx(), t.DstStorage, t.DstPath)
-	if err != nil {
-		return err
-	}
-	if !comparePathList(srcList, dstList) {
-		return errors.New("target verification failed: destination does not match source")
+
+	if len(errs) > 0 {
+		return fmt.Errorf("partial move failed: %v", errs)
 	}
 
-	t.Status = "Deleting source files"
-	for i := len(srcList) - 1; i >= 0; i-- {
-		_ = op.Delete(t.Ctx(), t.SrcStorage, srcList[i].Path)
+	for _, obj := range t.SrcObjs {
+		_ = op.Delete(t.Ctx(), t.srcStorage, obj.GetPath())
 	}
-	t.Status = "Completed"
-	close(t.DoneChan)
+
+	t.Status = "done"
 	return nil
 }
 
-func recursiveList(ctx context.Context, drv driver.Driver, base string) ([]*model.Obj, error) {
-	objs := []*model.Obj{}
-	list, err := op.List(ctx, drv, base, model.ListArgs{})
-	if err != nil {
-		return nil, err
+var MoveTaskManager = tache.NewManager[*MoveTask]()
+
+func GetMoveProgress(taskID string) (float64, string) {
+	t := MoveTaskManager.Get(taskID)
+	if t == nil {
+		return 0, "not found"
 	}
-	for _, obj := range list {
-		fullPath := path.Join(base, obj.GetName())
-		obj.SetPath(fullPath)
-		objs = append(objs, obj)
-		if obj.IsDir() {
-			subObjs, err := recursiveList(ctx, drv, fullPath)
-			if err != nil {
-				return nil, err
-			}
-			objs = append(objs, subObjs...)
-		}
-	}
-	return objs, nil
+	return t.GetProgress(), t.GetStatus()
 }
 
-func comparePathList(src, dst []*model.Obj) bool {
-	if len(src) != len(dst) {
-		return false
+func Move(ctx context.Context, srcPaths []string, dstPath string) (task.TaskExtensionInfo, error) {
+	if len(srcPaths) == 0 {
+		return nil, errors.New("empty source")
 	}
-	m := map[string]bool{}
-	for _, obj := range dst {
-		m[obj.GetPath()+"-"+obj.GetType()] = true
-	}
-	for _, obj := range src {
-		if !m[obj.GetPath()+"-"+obj.GetType()] {
-			return false
-		}
-	}
-	return true
-}
-
-// 发起移动任务（跨存储目录）
-func MoveWithVerify(ctx context.Context, srcPath, dstPath string) (task.TaskExtensionInfo, error) {
-	srcStorage, srcActualPath, err := op.GetStorageAndActualPath(srcPath)
+	srcStorage, firstPath, err := op.GetStorageAndActualPath(srcPaths[0])
 	if err != nil {
 		return nil, err
 	}
@@ -140,52 +139,49 @@ func MoveWithVerify(ctx context.Context, srcPath, dstPath string) (task.TaskExte
 		return nil, err
 	}
 
-	srcObj, err := op.Get(ctx, srcStorage, srcActualPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if srcStorage.GetStorage() == dstStorage.GetStorage() || !srcObj.IsDir() {
-		return op.Move(ctx, srcStorage, srcActualPath, dstActualPath)
+	if srcStorage.GetStorage() == dstStorage.GetStorage() {
+		for _, p := range srcPaths {
+			if err := op.Move(ctx, srcStorage, p, dstActualPath); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
 	}
 
 	if ctx.Value(conf.NoTaskKey) != nil {
-		return nil, errs.NotSupport
+		return nil, errors.New("跨存储移动需异步处理")
+	}
+
+	var objs []model.Obj
+	for _, path := range srcPaths {
+		st, ap, err := op.GetStorageAndActualPath(path)
+		if err != nil {
+			return nil, err
+		}
+		obj, err := op.Get(ctx, st, ap)
+		if err != nil {
+			return nil, err
+		}
+		objs = append(objs, obj)
 	}
 
 	taskCreator, _ := ctx.Value("user").(*model.User)
-	t := &MoveDirTask{
+	t := &MoveTask{
 		TaskExtension: task.TaskExtension{
 			Creator: taskCreator,
 		},
-		SrcStorage: srcStorage,
-		DstStorage: dstStorage,
-		SrcPath:    srcActualPath,
-		DstPath:    dstActualPath,
+		SrcObjs:      objs,
+		DstDir:       dstActualPath,
+		SrcStorageMp: srcStorage.GetStorage().MountPath,
+		DstStorageMp: dstStorage.GetStorage().MountPath,
+		srcStorage:   srcStorage,
+		dstStorage:   dstStorage,
 	}
-	task.GlobalTaskManager.Add(t)
+	MoveTaskManager.Add(t)
 	return t, nil
 }
 
-// move task API Service
-func GetMoveProgress(taskID string) (float64, string) {
-	v := task.GlobalTaskManager.Get(taskID)
-	if mv, ok := v.(*MoveDirTask); ok {
-		return mv.GetProgress(), mv.GetStatus()
-	}
-	return 0, "not found"
-}
-
-func (t *MoveDirTask) GetProgress() float64 {
-	t.Lock.Lock()
-	defer t.Lock.Unlock()
-	var total, done int64
-	for _, ct := range t.SubTasks {
-		total += ct.GetTotalBytes()
-		done += ct.GetCompletedBytes()
-	}
-	if total == 0 {
-		return 0
-	}
-	return float64(done) / float64(total)
+func _move(ctx context.Context, src, dst string) error {
+	_, err := Move(ctx, []string{src}, dst)
+	return err
 }
