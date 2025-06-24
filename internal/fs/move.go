@@ -86,7 +86,7 @@ func moveBetween2Storages(t *MoveTask, srcStorage, dstStorage driver.Driver, src
         }
 
 		t.Status = "listing source directory"
-		objs, err := op.List(t.Ctx(), srcStorage, srcObjPath, model.ListArgs{})
+		objs, err = op.List(t.Ctx(), srcStorage, srcObjPath, model.ListArgs{})
 		if err != nil {
 			return errors.WithMessagef(err, "failed to list [%s]", srcObjPath)
 		}
