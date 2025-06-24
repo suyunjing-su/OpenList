@@ -21,19 +21,20 @@ import (
 
 type MoveTask struct {
 	task.TaskExtension
-	Status         string        `json:"-"`
-	SrcObjPath     string        `json:"src_path"`
-	DstDirPath     string        `json:"dst_path"`
-	srcStorage     driver.Driver `json:"-"`
-	dstStorage     driver.Driver `json:"-"`
-	SrcStorageMp   string        `json:"src_storage_mp"`
-	DstStorageMp   string        `json:"dst_storage_mp"`
-	IsRootTask     bool          `json:"is_root_task"`
-	RootTaskID     string        `json:"root_task_id"`
-	TotalFiles     int           `json:"total_files"`
-	CompletedFiles int           `json:"completed_files"`
-	Phase          string        `json:"phase"` // "copying", "verifying", "deleting", "completed"
-	mu             sync.RWMutex  `json:"-"`
+	Status           string        `json:"-"`
+	SrcObjPath       string        `json:"src_path"`
+	DstDirPath       string        `json:"dst_path"`
+	srcStorage       driver.Driver `json:"-"`
+	dstStorage       driver.Driver `json:"-"`
+	SrcStorageMp     string        `json:"src_storage_mp"`
+	DstStorageMp     string        `json:"dst_storage_mp"`
+	IsRootTask       bool          `json:"is_root_task"`
+	RootTaskID       string        `json:"root_task_id"`
+	TotalFiles       int           `json:"total_files"`
+	CompletedFiles   int           `json:"completed_files"`
+	Phase            string        `json:"phase"` // "copying", "verifying", "deleting", "completed"
+	ValidateExistence bool         `json:"validate_existence"`
+	mu               sync.RWMutex  `json:"-"`
 }
 
 type MoveProgress struct {
@@ -126,14 +127,55 @@ func (t *MoveTask) Run() error {
 		return errors.WithMessage(err, "failed get storage")
 	}
 
-	if t.IsRootTask {
+	// Phase 1: Async validation (all validation happens in background)
+	t.mu.Lock()
+	t.Status = "validating source and destination"
+	t.mu.Unlock()
+	
+	// Check if source exists
+	srcObj, err := op.Get(t.Ctx(), t.srcStorage, t.SrcObjPath)
+	if err != nil {
+		return errors.WithMessagef(err, "source file [%s] not found", stdpath.Base(t.SrcObjPath))
+	}
+	
+	// Check if destination already exists (if validation is required)
+	if t.ValidateExistence {
+		dstFilePath := stdpath.Join(t.DstDirPath, srcObj.GetName())
+		if res, _ := op.Get(t.Ctx(), t.dstStorage, dstFilePath); res != nil {
+			return errors.Errorf("destination file [%s] already exists", srcObj.GetName())
+		}
+	}
+
+	// Phase 2: Execute move operation with proper sequencing
+	// Determine if we should use batch optimization for directories
+	if srcObj.IsDir() {
+		t.mu.Lock()
+		t.IsRootTask = true
+		t.RootTaskID = t.GetID()
+		t.mu.Unlock()
 		return t.runRootMoveTask()
 	}
 	
-	return moveBetween2Storages(t, t.srcStorage, t.dstStorage, t.SrcObjPath, t.DstDirPath)
+	// Use safe move logic for files
+	return t.safeMoveOperation(srcObj)
 }
 
 func (t *MoveTask) runRootMoveTask() error {
+	// First check if source is actually a directory
+	// If not, fall back to regular move logic
+	srcObj, err := op.Get(t.Ctx(), t.srcStorage, t.SrcObjPath)
+	if err != nil {
+		return errors.WithMessagef(err, "failed get src [%s] object", t.SrcObjPath)
+	}
+	
+	if !srcObj.IsDir() {
+		// Source is not a directory, use regular move logic
+		t.mu.Lock()
+		t.IsRootTask = false
+		t.mu.Unlock()
+		return t.safeMoveOperation(srcObj)
+	}
+	
 	// Phase 1: Count total files and create directory structure
 	t.mu.Lock()
 	t.Phase = "preparing"
@@ -516,7 +558,22 @@ func moveFileBetween2Storages(tsk *MoveTask, srcStorage, dstStorage driver.Drive
 }
 
 
+// safeMoveOperation ensures copy-then-delete sequence for safe move operations
+func (t *MoveTask) safeMoveOperation(srcObj model.Obj) error {
+	if srcObj.IsDir() {
+		// For directories, use the original logic but ensure proper sequencing
+		return moveBetween2Storages(t, t.srcStorage, t.dstStorage, t.SrcObjPath, t.DstDirPath)
+	} else {
+		// For files, use the safe file move logic
+		return moveFileBetween2Storages(t, t.srcStorage, t.dstStorage, t.SrcObjPath, t.DstDirPath)
+	}
+}
+
 func _move(ctx context.Context, srcObjPath, dstDirPath string, lazyCache ...bool) (task.TaskExtensionInfo, error) {
+	return _moveWithValidation(ctx, srcObjPath, dstDirPath, false, lazyCache...)
+}
+
+func _moveWithValidation(ctx context.Context, srcObjPath, dstDirPath string, validateExistence bool, lazyCache ...bool) (task.TaskExtensionInfo, error) {
 	srcStorage, srcObjActualPath, err := op.GetStorageAndActualPath(srcObjPath)
 	if err != nil {
 		return nil, errors.WithMessage(err, "failed get src storage")
@@ -536,28 +593,20 @@ func _move(ctx context.Context, srcObjPath, dstDirPath string, lazyCache ...bool
 
 	taskCreator, _ := ctx.Value("user").(*model.User)
 	
-	// Check if source is a directory to determine if we need the improved move logic
-	srcObj, err := op.Get(ctx, srcStorage, srcObjActualPath)
-	if err != nil {
-		return nil, errors.WithMessagef(err, "failed get src [%s] object", srcObjPath)
-	}
-	
+	// Create task immediately without any synchronous checks to avoid blocking frontend
+	// All validation and type checking will be done asynchronously in the Run method
 	t := &MoveTask{
 		TaskExtension: task.TaskExtension{
 			Creator: taskCreator,
 		},
-		srcStorage:   srcStorage,
-		dstStorage:   dstStorage,
-		SrcObjPath:   srcObjActualPath,
-		DstDirPath:   dstDirActualPath,
-		SrcStorageMp: srcStorage.GetStorage().MountPath,
-		DstStorageMp: dstStorage.GetStorage().MountPath,
-		IsRootTask:   srcObj.IsDir(), // Use improved logic for directories
-		Phase:        "preparing",
-	}
-	
-	if t.IsRootTask {
-		t.RootTaskID = t.GetID()
+		srcStorage:        srcStorage,
+		dstStorage:        dstStorage,
+		SrcObjPath:        srcObjActualPath,
+		DstDirPath:        dstDirActualPath,
+		SrcStorageMp:      srcStorage.GetStorage().MountPath,
+		DstStorageMp:      dstStorage.GetStorage().MountPath,
+		ValidateExistence: validateExistence,
+		Phase:             "initializing",
 	}
 	
 	MoveTaskManager.Add(t)
