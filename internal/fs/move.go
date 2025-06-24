@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	stdpath "path"
-	"strings"
 	"sync"
 	"time"
 
@@ -59,23 +58,33 @@ func (t *MoveTask) GetStatus() string {
 	return t.Status
 }
 
-func (t *MoveTask) GetProgress() *MoveProgress {
+func (t *MoveTask) GetProgress() float64 {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	
-	progress := 0
-	if t.TotalFiles > 0 {
-		switch t.Phase {
-		case "copying":
-			progress = (t.CompletedFiles * 60) / t.TotalFiles
-		case "verifying":
-			progress = 60 + (t.CompletedFiles*20)/t.TotalFiles
-		case "deleting":
-			progress = 80 + (t.CompletedFiles*20)/t.TotalFiles
-		case "completed":
-			progress = 100
-		}
+	if t.TotalFiles == 0 {
+		return 0
 	}
+	
+	switch t.Phase {
+	case "copying":
+		return float64(t.CompletedFiles*60) / float64(t.TotalFiles)
+	case "verifying":
+		return 60 + float64(t.CompletedFiles*20)/float64(t.TotalFiles)
+	case "deleting":
+		return 80 + float64(t.CompletedFiles*20)/float64(t.TotalFiles)
+	case "completed":
+		return 100
+	default:
+		return 0
+	}
+}
+
+func (t *MoveTask) GetMoveProgress() *MoveProgress {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	
+	progress := int(t.GetProgress())
 	
 	return &MoveProgress{
 		TaskID:         t.GetID(),
@@ -90,7 +99,7 @@ func (t *MoveTask) GetProgress() *MoveProgress {
 
 func (t *MoveTask) updateProgress() {
 	if t.IsRootTask {
-		progress := t.GetProgress()
+		progress := t.GetMoveProgress()
 		moveProgressMap.Store(t.GetID(), progress)
 	}
 }
@@ -193,6 +202,11 @@ func GetMoveProgress(taskID string) (*MoveProgress, bool) {
 		return progress.(*MoveProgress), true
 	}
 	return nil, false
+}
+
+// GetMoveTaskProgress returns the progress of a specific move task
+func GetMoveTaskProgress(task *MoveTask) *MoveProgress {
+	return task.GetMoveProgress()
 }
 
 // countFilesAndCreateDirs recursively counts files and creates directory structure
