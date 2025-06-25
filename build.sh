@@ -62,6 +62,21 @@ FetchWebRelease() {
   rm -rf dist.tar.gz
 }
 
+# Create CDN version with only index.html
+CreateCdnVersion() {
+  echo "Creating CDN version..."
+  rm -rf public/dist-cdn && mkdir -p public/dist-cdn
+  # Only copy index.html and essential files for CDN version
+  cp public/dist/index.html public/dist-cdn/
+  if [ -f public/dist/README.md ]; then
+    cp public/dist/README.md public/dist-cdn/
+  fi
+  if [ -f public/dist/VERSION ]; then
+    cp public/dist/VERSION public/dist-cdn/
+  fi
+  echo "CDN version created with minimal files"
+}
+
 BuildWinArm64() {
   echo building for windows-arm64
   chmod +x ./wrapper/zcc-arm64
@@ -71,7 +86,11 @@ BuildWinArm64() {
   export CC=$(pwd)/wrapper/zcc-arm64
   export CXX=$(pwd)/wrapper/zcxx-arm64
   export CGO_ENABLED=1
-  go build -o "$1" -ldflags="$ldflags" -tags=jsoniter .
+  if [[ "$1" == *"-cdn"* ]]; then
+    go build -o "$1" -ldflags="$ldflags" -tags="jsoniter cdn" .
+  else
+    go build -o "$1" -ldflags="$ldflags" -tags=jsoniter .
+  fi
 }
 
 BuildDev() {
@@ -87,6 +106,50 @@ BuildDev() {
   done
   OS_ARCHES=(linux-musl-amd64 linux-musl-arm64)
   CGO_ARGS=(x86_64-linux-musl-gcc aarch64-linux-musl-gcc)
+  
+  # Check if only CDN version should be built
+  if [ "$3" = "cdn-only" ]; then
+    echo "Building CDN version only..."
+    CreateCdnVersion
+    for i in "${!OS_ARCHES[@]}"; do
+      os_arch=${OS_ARCHES[$i]}
+      cgo_cc=${CGO_ARGS[$i]}
+      echo building CDN version for ${os_arch}
+      export GOOS=${os_arch%%-*}
+      export GOARCH=${os_arch##*-}
+      export CC=${cgo_cc}
+      export CGO_ENABLED=1
+      go build -o ./dist/$appName-$os_arch-cdn -ldflags="$muslflags" -tags="jsoniter cdn" .
+    done
+    xgo -targets=windows/amd64,darwin/amd64,darwin/arm64 -out "$appName-cdn" -ldflags="$ldflags" -tags="jsoniter cdn" .
+    mv "$appName-cdn"-* dist
+    # Rename CDN binaries to have -cdn suffix
+    cd dist
+    for file in "$appName-cdn"-*; do
+      if [[ "$file" != *"-cdn-"* ]]; then
+        newname=$(echo "$file" | sed "s/$appName-cdn-/$appName-/" | sed "s/\.$/$-cdn./")
+        if [[ "$file" == *".exe" ]]; then
+          newname=$(echo "$file" | sed "s/$appName-cdn-/$appName-/" | sed "s/\.exe$/-cdn.exe/")
+        else
+          newname=$(echo "$file" | sed "s/$appName-cdn-/$appName-/" | sed "s/$/-cdn/")
+        fi
+        mv "$file" "$newname"
+      fi
+    done
+    cd ..
+    
+    cd dist
+    if [ -f ./"$appName"-windows-amd64-cdn.exe ]; then
+      cp ./"$appName"-windows-amd64-cdn.exe ./"$appName"-windows-amd64-cdn-upx.exe
+      upx -9 ./"$appName"-windows-amd64-cdn-upx.exe
+    fi
+    find . -type f -print0 | xargs -0 md5sum >md5.txt
+    cat md5.txt
+    return
+  fi
+  
+  # Build standard version
+  echo "Building standard version..."
   for i in "${!OS_ARCHES[@]}"; do
     os_arch=${OS_ARCHES[$i]}
     cgo_cc=${CGO_ARGS[$i]}
@@ -99,15 +162,60 @@ BuildDev() {
   done
   xgo -targets=windows/amd64,darwin/amd64,darwin/arm64 -out "$appName" -ldflags="$ldflags" -tags=jsoniter .
   mv "$appName"-* dist
+  
+  # Build CDN version
+  echo "Building CDN version..."
+  CreateCdnVersion
+  for i in "${!OS_ARCHES[@]}"; do
+    os_arch=${OS_ARCHES[$i]}
+    cgo_cc=${CGO_ARGS[$i]}
+    echo building CDN version for ${os_arch}
+    export GOOS=${os_arch%%-*}
+    export GOARCH=${os_arch##*-}
+    export CC=${cgo_cc}
+    export CGO_ENABLED=1
+    go build -o ./dist/$appName-$os_arch-cdn -ldflags="$muslflags" -tags="jsoniter cdn" .
+  done
+  xgo -targets=windows/amd64,darwin/amd64,darwin/arm64 -out "$appName-cdn" -ldflags="$ldflags" -tags="jsoniter cdn" .
+  mv "$appName-cdn"-* dist
+  # Rename CDN binaries to have -cdn suffix
+  cd dist
+  for file in "$appName-cdn"-*; do
+    if [[ "$file" != *"-cdn-"* ]]; then
+      newname=$(echo "$file" | sed "s/$appName-cdn-/$appName-/" | sed "s/\.$/$-cdn./")
+      if [[ "$file" == *".exe" ]]; then
+        newname=$(echo "$file" | sed "s/$appName-cdn-/$appName-/" | sed "s/\.exe$/-cdn.exe/")
+      else
+        newname=$(echo "$file" | sed "s/$appName-cdn-/$appName-/" | sed "s/$/-cdn/")
+      fi
+      mv "$file" "$newname"
+    fi
+  done
+  cd ..
+  
   cd dist
   cp ./"$appName"-windows-amd64.exe ./"$appName"-windows-amd64-upx.exe
   upx -9 ./"$appName"-windows-amd64-upx.exe
+  if [ -f ./"$appName"-windows-amd64-cdn.exe ]; then
+    cp ./"$appName"-windows-amd64-cdn.exe ./"$appName"-windows-amd64-cdn-upx.exe
+    upx -9 ./"$appName"-windows-amd64-cdn-upx.exe
+  fi
   find . -type f -print0 | xargs -0 md5sum >md5.txt
   cat md5.txt
 }
 
 BuildDocker() {
+  # Check if only CDN version should be built
+  if [ "$3" = "cdn-only" ]; then
+    echo "Building CDN version only for Docker..."
+    go build -o ./bin/"$appName"-cdn -ldflags="$ldflags" -tags="jsoniter cdn" .
+    return
+  fi
+  
+  # Build standard version
   go build -o ./bin/"$appName" -ldflags="$ldflags" -tags=jsoniter .
+  # Build CDN version
+  go build -o ./bin/"$appName"-cdn -ldflags="$ldflags" -tags="jsoniter cdn" .
 }
 
 PrepareBuildDockerMusl() {
@@ -134,6 +242,42 @@ BuildDockerMultiplatform() {
 
   OS_ARCHES=(linux-amd64 linux-arm64 linux-386 linux-s390x linux-riscv64 linux-ppc64le)
   CGO_ARGS=(x86_64-linux-musl-gcc aarch64-linux-musl-gcc i486-linux-musl-gcc s390x-linux-musl-gcc riscv64-linux-musl-gcc powerpc64le-linux-musl-gcc)
+  
+  # Check if only CDN version should be built
+  if [ "$3" = "cdn-only" ]; then
+    echo "Building CDN version only for Docker multiplatform..."
+    # Build CDN version
+    for i in "${!OS_ARCHES[@]}"; do
+      os_arch=${OS_ARCHES[$i]}
+      cgo_cc=${CGO_ARGS[$i]}
+      os=${os_arch%%-*}
+      arch=${os_arch##*-}
+      export GOOS=$os
+      export GOARCH=$arch
+      export CC=${cgo_cc}
+      echo "building CDN version for $os_arch"
+      go build -o build/$os/$arch/"$appName"-cdn -ldflags="$docker_lflags" -tags="jsoniter cdn" .
+    done
+
+    DOCKER_ARM_ARCHES=(linux-arm/v6 linux-arm/v7)
+    CGO_ARGS=(armv6-linux-musleabihf-gcc armv7l-linux-musleabihf-gcc)
+    GO_ARM=(6 7)
+    export GOOS=linux
+    export GOARCH=arm
+    
+    # Build CDN version for ARM
+    for i in "${!DOCKER_ARM_ARCHES[@]}"; do
+      docker_arch=${DOCKER_ARM_ARCHES[$i]}
+      cgo_cc=${CGO_ARGS[$i]}
+      export GOARM=${GO_ARM[$i]}
+      export CC=${cgo_cc}
+      echo "building CDN version for $docker_arch"
+      go build -o build/${docker_arch%%-*}/${docker_arch##*-}/"$appName"-cdn -ldflags="$docker_lflags" -tags="jsoniter cdn" .
+    done
+    return
+  fi
+  
+  # Build standard version
   for i in "${!OS_ARCHES[@]}"; do
     os_arch=${OS_ARCHES[$i]}
     cgo_cc=${CGO_ARGS[$i]}
@@ -142,8 +286,21 @@ BuildDockerMultiplatform() {
     export GOOS=$os
     export GOARCH=$arch
     export CC=${cgo_cc}
-    echo "building for $os_arch"
+    echo "building standard version for $os_arch"
     go build -o build/$os/$arch/"$appName" -ldflags="$docker_lflags" -tags=jsoniter .
+  done
+
+  # Build CDN version
+  for i in "${!OS_ARCHES[@]}"; do
+    os_arch=${OS_ARCHES[$i]}
+    cgo_cc=${CGO_ARGS[$i]}
+    os=${os_arch%%-*}
+    arch=${os_arch##*-}
+    export GOOS=$os
+    export GOARCH=$arch
+    export CC=${cgo_cc}
+    echo "building CDN version for $os_arch"
+    go build -o build/$os/$arch/"$appName"-cdn -ldflags="$docker_lflags" -tags="jsoniter cdn" .
   done
 
   DOCKER_ARM_ARCHES=(linux-arm/v6 linux-arm/v7)
@@ -151,19 +308,61 @@ BuildDockerMultiplatform() {
   GO_ARM=(6 7)
   export GOOS=linux
   export GOARCH=arm
+  
+  # Build standard version for ARM
   for i in "${!DOCKER_ARM_ARCHES[@]}"; do
     docker_arch=${DOCKER_ARM_ARCHES[$i]}
     cgo_cc=${CGO_ARGS[$i]}
     export GOARM=${GO_ARM[$i]}
     export CC=${cgo_cc}
-    echo "building for $docker_arch"
+    echo "building standard version for $docker_arch"
     go build -o build/${docker_arch%%-*}/${docker_arch##*-}/"$appName" -ldflags="$docker_lflags" -tags=jsoniter .
+  done
+  
+  # Build CDN version for ARM
+  for i in "${!DOCKER_ARM_ARCHES[@]}"; do
+    docker_arch=${DOCKER_ARM_ARCHES[$i]}
+    cgo_cc=${CGO_ARGS[$i]}
+    export GOARM=${GO_ARM[$i]}
+    export CC=${cgo_cc}
+    echo "building CDN version for $docker_arch"
+    go build -o build/${docker_arch%%-*}/${docker_arch##*-}/"$appName"-cdn -ldflags="$docker_lflags" -tags="jsoniter cdn" .
   done
 }
 
 BuildRelease() {
   rm -rf .git/
   mkdir -p "build"
+  
+  # Check if only CDN version should be built
+  if [ "$3" = "cdn-only" ]; then
+    echo "Building CDN release version only..."
+    CreateCdnVersion
+    BuildWinArm64 ./build/"$appName"-windows-arm64-cdn.exe
+    xgo -out "$appName-cdn" -ldflags="$ldflags" -tags="jsoniter cdn" .
+    upx -9 ./"$appName-cdn"-linux-amd64
+    cp ./"$appName-cdn"-windows-amd64.exe ./"$appName-cdn"-windows-amd64-upx.exe
+    upx -9 ./"$appName-cdn"-windows-amd64-upx.exe
+    
+    # Rename CDN binaries to have -cdn suffix
+    for file in "$appName-cdn"-*; do
+      if [[ "$file" != *"-cdn-"* ]]; then
+        newname=$(echo "$file" | sed "s/$appName-cdn-/$appName-/" | sed "s/\.$/$-cdn./")
+        if [[ "$file" == *".exe" ]]; then
+          newname=$(echo "$file" | sed "s/$appName-cdn-/$appName-/" | sed "s/\.exe$/-cdn.exe/")
+        else
+          newname=$(echo "$file" | sed "s/$appName-cdn-/$appName-/" | sed "s/$/-cdn/")
+        fi
+        mv "$file" "build/$newname"
+      else
+        mv "$file" build/
+      fi
+    done
+    return
+  fi
+  
+  # Build standard version
+  echo "Building standard release version..."
   BuildWinArm64 ./build/"$appName"-windows-arm64.exe
   xgo -out "$appName" -ldflags="$ldflags" -tags=jsoniter .
   # why? Because some target platforms seem to have issues with upx compression
@@ -171,6 +370,30 @@ BuildRelease() {
   cp ./"$appName"-windows-amd64.exe ./"$appName"-windows-amd64-upx.exe
   upx -9 ./"$appName"-windows-amd64-upx.exe
   mv "$appName"-* build
+  
+  # Build CDN version
+  echo "Building CDN release version..."
+  CreateCdnVersion
+  BuildWinArm64 ./build/"$appName"-windows-arm64-cdn.exe
+  xgo -out "$appName-cdn" -ldflags="$ldflags" -tags="jsoniter cdn" .
+  upx -9 ./"$appName-cdn"-linux-amd64
+  cp ./"$appName-cdn"-windows-amd64.exe ./"$appName-cdn"-windows-amd64-upx.exe
+  upx -9 ./"$appName-cdn"-windows-amd64-upx.exe
+  
+  # Rename CDN binaries to have -cdn suffix
+  for file in "$appName-cdn"-*; do
+    if [[ "$file" != *"-cdn-"* ]]; then
+      newname=$(echo "$file" | sed "s/$appName-cdn-/$appName-/" | sed "s/\.$/$-cdn./")
+      if [[ "$file" == *".exe" ]]; then
+        newname=$(echo "$file" | sed "s/$appName-cdn-/$appName-/" | sed "s/\.exe$/-cdn.exe/")
+      else
+        newname=$(echo "$file" | sed "s/$appName-cdn-/$appName-/" | sed "s/$/-cdn/")
+      fi
+      mv "$file" "build/$newname"
+    else
+      mv "$file" build/
+    fi
+  done
 }
 
 BuildReleaseLinuxMusl() {
@@ -328,14 +551,18 @@ MakeRelease() {
 
 if [ "$1" = "dev" ]; then
   FetchWebDev
+  # Only create CDN version if not building standard version only
+  if [ "$3" != "standard-only" ]; then
+    CreateCdnVersion
+  fi
   if [ "$2" = "docker" ]; then
-    BuildDocker
+    BuildDocker "$1" "$2" "$3"
   elif [ "$2" = "docker-multiplatform" ]; then
-      BuildDockerMultiplatform
+      BuildDockerMultiplatform "$1" "$2" "$3"
   elif [ "$2" = "web" ]; then
     echo "web only"
   else
-    BuildDev
+    BuildDev "$1" "$2" "$3"
   fi
 elif [ "$1" = "release" -o "$1" = "beta" ]; then
   if [ "$1" = "beta" ]; then
@@ -343,26 +570,30 @@ elif [ "$1" = "release" -o "$1" = "beta" ]; then
   else
     FetchWebRelease
   fi
+  # Only create CDN version if not building standard version only
+  if [ "$3" != "standard-only" ]; then
+    CreateCdnVersion
+  fi
   if [ "$2" = "docker" ]; then
-    BuildDocker
+    BuildDocker "$1" "$2" "$3"
   elif [ "$2" = "docker-multiplatform" ]; then
-    BuildDockerMultiplatform
+    BuildDockerMultiplatform "$1" "$2" "$3"
   elif [ "$2" = "linux_musl_arm" ]; then
-    BuildReleaseLinuxMuslArm
+    BuildReleaseLinuxMuslArm "$1" "$2" "$3"
     MakeRelease "md5-linux-musl-arm.txt"
   elif [ "$2" = "linux_musl" ]; then
-    BuildReleaseLinuxMusl
+    BuildReleaseLinuxMusl "$1" "$2" "$3"
     MakeRelease "md5-linux-musl.txt"
   elif [ "$2" = "android" ]; then
-    BuildReleaseAndroid
+    BuildReleaseAndroid "$1" "$2" "$3"
     MakeRelease "md5-android.txt"
   elif [ "$2" = "freebsd" ]; then
-    BuildReleaseFreeBSD
+    BuildReleaseFreeBSD "$1" "$2" "$3"
     MakeRelease "md5-freebsd.txt"
   elif [ "$2" = "web" ]; then
     echo "web only"
   else
-    BuildRelease
+    BuildRelease "$1" "$2" "$3"
     MakeRelease "md5.txt"
   fi
 elif [ "$1" = "prepare" ]; then
@@ -373,4 +604,31 @@ elif [ "$1" = "zip" ]; then
   MakeRelease "$2".txt
 else
   echo -e "Parameter error"
+  echo "Usage:"
+  echo "  $0 <version> [build-type] [build-mode]"
+  echo ""
+  echo "Version:"
+  echo "  dev      - Development build"
+  echo "  beta     - Beta build"
+  echo "  release  - Release build"
+  echo ""
+  echo "Build Type:"
+  echo "  docker                - Docker build"
+  echo "  docker-multiplatform  - Docker multiplatform build"
+  echo "  linux_musl           - Linux musl build"
+  echo "  linux_musl_arm       - Linux musl ARM build"
+  echo "  android              - Android build"
+  echo "  freebsd              - FreeBSD build"
+  echo "  web                  - Web only (no build)"
+  echo ""
+  echo "Build Mode:"
+  echo "  cdn-only      - Build only CDN version"
+  echo "  standard-only - Build only standard version"
+  echo "  (default)     - Build both versions"
+  echo ""
+  echo "Examples:"
+  echo "  $0 dev                           # Build both versions for dev"
+  echo "  $0 beta docker-multiplatform     # Build both versions for beta docker multiplatform"
+  echo "  $0 release docker cdn-only       # Build only CDN version for release docker"
+  echo "  $0 dev standard-only             # Build only standard version for dev"
 fi

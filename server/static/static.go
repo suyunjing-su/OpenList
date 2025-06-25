@@ -20,7 +20,14 @@ var static fs.FS
 
 func initStatic() {
 	if conf.Conf.DistDir == "" {
-		dist, err := fs.Sub(public.Public, "dist")
+		var dist fs.FS
+		var err error
+		// Use CDN version if built with cdn tag, otherwise use standard version
+		if isCdnBuild() {
+			dist, err = fs.Sub(public.PublicCdn, "dist-cdn")
+		} else {
+			dist, err = fs.Sub(public.Public, "dist")
+		}
 		if err != nil {
 			utils.Log.Fatalf("failed to read dist dir")
 		}
@@ -86,19 +93,41 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 	initStatic()
 	initIndex()
 	folders := []string{"assets", "images", "streamer", "static"}
-	r.Use(func(c *gin.Context) {
-		for i := range folders {
-			if strings.HasPrefix(c.Request.RequestURI, fmt.Sprintf("/%s/", folders[i])) {
-				c.Header("Cache-Control", "public, max-age=15552000")
+	
+	// For CDN build, only serve static files that exist locally
+	if isCdnBuild() {
+		utils.Log.Info("Running in CDN mode - static assets will be served from CDN")
+		// Only set cache headers for requests that might exist
+		r.Use(func(c *gin.Context) {
+			for i := range folders {
+				if strings.HasPrefix(c.Request.RequestURI, fmt.Sprintf("/%s/", folders[i])) {
+					c.Header("Cache-Control", "public, max-age=15552000")
+				}
+			}
+		})
+		// Try to serve static files, but don't fail if folders don't exist in CDN version
+		for i, folder := range folders {
+			sub, err := fs.Sub(static, folder)
+			if err == nil {
+				r.StaticFS(fmt.Sprintf("/%s/", folders[i]), http.FS(sub))
 			}
 		}
-	})
-	for i, folder := range folders {
-		sub, err := fs.Sub(static, folder)
-		if err != nil {
-			utils.Log.Fatalf("can't find folder: %s", folder)
+	} else {
+		// Standard mode - serve all static files locally
+		r.Use(func(c *gin.Context) {
+			for i := range folders {
+				if strings.HasPrefix(c.Request.RequestURI, fmt.Sprintf("/%s/", folders[i])) {
+					c.Header("Cache-Control", "public, max-age=15552000")
+				}
+			}
+		})
+		for i, folder := range folders {
+			sub, err := fs.Sub(static, folder)
+			if err != nil {
+				utils.Log.Fatalf("can't find folder: %s", folder)
+			}
+			r.StaticFS(fmt.Sprintf("/%s/", folders[i]), http.FS(sub))
 		}
-		r.StaticFS(fmt.Sprintf("/%s/", folders[i]), http.FS(sub))
 	}
 
 	noRoute(func(c *gin.Context) {
