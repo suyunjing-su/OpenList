@@ -19,6 +19,7 @@ env:
   IMAGE_NAME_DOCKERHUB: openlist
   REGISTRY: ghcr.io
   ARTIFACT_NAME: 'binaries_docker_release'
+  ARTIFACT_NAME_LITE: 'binaries_docker_release_lite'
   RELEASE_PLATFORMS: 'linux/amd64,linux/arm64,linux/arm/v7,linux/386,linux/arm/v6,linux/s390x,linux/ppc64le,linux/riscv64'
   IMAGE_PUSH: ${{ github.event_name == 'push' }}
   IMAGE_TAGS_BETA: |
@@ -97,7 +98,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARTIFACT_NAME }}
+          name: ${{ env.ARTIFACT_NAME_LITE }}
           overwrite: true
           path: |
             build/
@@ -209,7 +210,7 @@ jobs:
         uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: ${{ env.ARTIFACT_NAME }}
+          name: ${{ env.ARTIFACT_NAME_LITE }}
           path: 'build/'
 
       - name: Set up QEMU
