@@ -412,21 +412,41 @@ elif [ "$buildType" = "release" -o "$buildType" = "beta" ]; then
     BuildDockerMultiplatform
   elif [ "$dockerType" = "linux_musl_arm" ]; then
     BuildReleaseLinuxMuslArm
-    MakeRelease "md5-linux-musl-arm.txt"
+    if [ "$useLite" = true ]; then
+      MakeRelease "md5-linux-musl-arm-lite.txt"
+    else
+      MakeRelease "md5-linux-musl-arm.txt"
+    fi
   elif [ "$dockerType" = "linux_musl" ]; then
     BuildReleaseLinuxMusl
-    MakeRelease "md5-linux-musl.txt"
+    if [ "$useLite" = true ]; then
+      MakeRelease "md5-linux-musl-lite.txt"
+    else
+      MakeRelease "md5-linux-musl.txt"
+    fi
   elif [ "$dockerType" = "android" ]; then
     BuildReleaseAndroid
-    MakeRelease "md5-android.txt"
+    if [ "$useLite" = true ]; then
+      MakeRelease "md5-android-lite.txt"
+    else
+      MakeRelease "md5-android.txt"
+    fi
   elif [ "$dockerType" = "freebsd" ]; then
     BuildReleaseFreeBSD
-    MakeRelease "md5-freebsd.txt"
+    if [ "$useLite" = true ]; then
+      MakeRelease "md5-freebsd-lite.txt"
+    else
+      MakeRelease "md5-freebsd.txt"
+    fi
   elif [ "$dockerType" = "web" ]; then
     echo "web only"
   else
     BuildRelease
-    MakeRelease "md5.txt"
+    if [ "$useLite" = true ]; then
+      MakeRelease "md5-lite.txt"
+    else
+      MakeRelease "md5.txt"
+    fi
   fi
 elif [ "$buildType" = "prepare" ]; then
   if [ "$dockerType" = "docker-multiplatform" ]; then
@@ -434,11 +454,23 @@ elif [ "$buildType" = "prepare" ]; then
   fi
 elif [ "$buildType" = "zip" ]; then
   if [ -n "$otherParam" ]; then
-    MakeRelease "$otherParam".txt
+    if [ "$useLite" = true ]; then
+      MakeRelease "$otherParam-lite.txt"
+    else
+      MakeRelease "$otherParam.txt"
+    fi
   elif [ -n "$dockerType" ]; then
-    MakeRelease "$dockerType".txt
+    if [ "$useLite" = true ]; then
+      MakeRelease "$dockerType-lite.txt"
+    else
+      MakeRelease "$dockerType.txt"
+    fi
   else
-    MakeRelease "md5.txt"
+    if [ "$useLite" = true ]; then
+      MakeRelease "md5-lite.txt"
+    else
+      MakeRelease "md5.txt"
+    fi
   fi
 else
   echo -e "Parameter error"
