@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ORG_NAME: openlistteam
+  ORG_NAME: ${{ vars.DOCKERHUB_ORG_NAME || 'openlistteam' }}
   IMAGE_NAME: openlist-git
   IMAGE_NAME_DOCKERHUB: openlist
   REGISTRY: ghcr.io
