@@ -9,6 +9,12 @@ if [ -n "$GITHUB_TOKEN" ]; then
   githubAuthArgs="--header \"Authorization: Bearer $GITHUB_TOKEN\""
 fi
 
+# Check for lite parameter
+useLite=false
+if [[ "$*" == *"lite"* ]]; then
+  useLite=true
+fi
+
 if [ "$1" = "dev" ]; then
   version="dev"
   webVersion="dev"
@@ -24,6 +30,11 @@ fi
 
 echo "backend version: $version"
 echo "frontend version: $webVersion"
+if [ "$useLite" = true ]; then
+  echo "using lite frontend"
+else
+  echo "using standard frontend"
+fi
 
 ldflags="\
 -w -s \
@@ -43,7 +54,13 @@ FetchWebDev() {
     pre_release_json=$(eval "curl -fsSL --max-time 2 $githubAuthArgs -H \"Accept: application/vnd.github.v3+json\" \"https://api.github.com/repos/OpenListTeam/OpenList-Frontend/releases/tags/$pre_release_tag\"")
   fi
   pre_release_assets=$(echo "$pre_release_json" | jq -r '.assets[].browser_download_url')
-  pre_release_tar_url=$(echo "$pre_release_assets" | grep "openlist-frontend-dist" | grep "\.tar\.gz$")
+  
+  if [ "$useLite" = true ]; then
+    pre_release_tar_url=$(echo "$pre_release_assets" | grep "openlist-frontend-dist-lite" | grep "\.tar\.gz$")
+  else
+    pre_release_tar_url=$(echo "$pre_release_assets" | grep "openlist-frontend-dist" | grep -v "lite" | grep "\.tar\.gz$")
+  fi
+  
   curl -fsSL "$pre_release_tar_url" -o web-dist-dev.tar.gz
   rm -rf public/dist && mkdir -p public/dist
   tar -zxvf web-dist-dev.tar.gz -C public/dist
@@ -53,7 +70,13 @@ FetchWebDev() {
 FetchWebRelease() {
   release_json=$(eval "curl -fsSL --max-time 2 $githubAuthArgs -H \"Accept: application/vnd.github.v3+json\" \"https://api.github.com/repos/OpenListTeam/OpenList-Frontend/releases/latest\"")
   release_assets=$(echo "$release_json" | jq -r '.assets[].browser_download_url')
-  release_tar_url=$(echo "$release_assets" | grep "openlist-frontend-dist" | grep "\.tar\.gz$")
+  
+  if [ "$useLite" = true ]; then
+    release_tar_url=$(echo "$release_assets" | grep "openlist-frontend-dist-lite" | grep "\.tar\.gz$")
+  else
+    release_tar_url=$(echo "$release_assets" | grep "openlist-frontend-dist" | grep -v "lite" | grep "\.tar\.gz$")
+  fi
+  
   curl -fsSL "$release_tar_url" -o dist.tar.gz
   rm -rf public/dist && mkdir -p public/dist
   tar -zxvf dist.tar.gz -C public/dist
@@ -324,51 +347,94 @@ MakeRelease() {
   cd ../..
 }
 
-if [ "$1" = "dev" ]; then
+# Parse parameters to handle lite parameter position flexibility
+buildType=""
+dockerType=""
+otherParam=""
+
+for arg in "$@"; do
+  case $arg in
+    dev|beta|release|zip|prepare)
+      if [ -z "$buildType" ]; then
+        buildType="$arg"
+      fi
+      ;;
+    docker|docker-multiplatform|linux_musl_arm|linux_musl|android|freebsd|web)
+      if [ -z "$dockerType" ]; then
+        dockerType="$arg"
+      fi
+      ;;
+    lite)
+      # lite parameter is already handled above
+      ;;
+    *)
+      if [ -z "$otherParam" ]; then
+        otherParam="$arg"
+      fi
+      ;;
+  esac
+done
+
+if [ "$buildType" = "dev" ]; then
   FetchWebDev
-  if [ "$2" = "docker" ]; then
+  if [ "$dockerType" = "docker" ]; then
     BuildDocker
-  elif [ "$2" = "docker-multiplatform" ]; then
+  elif [ "$dockerType" = "docker-multiplatform" ]; then
       BuildDockerMultiplatform
-  elif [ "$2" = "web" ]; then
+  elif [ "$dockerType" = "web" ]; then
     echo "web only"
   else
     BuildDev
   fi
-elif [ "$1" = "release" -o "$1" = "beta" ]; then
-  if [ "$1" = "beta" ]; then
+elif [ "$buildType" = "release" -o "$buildType" = "beta" ]; then
+  if [ "$buildType" = "beta" ]; then
     FetchWebDev
   else
     FetchWebRelease
   fi
-  if [ "$2" = "docker" ]; then
+  if [ "$dockerType" = "docker" ]; then
     BuildDocker
-  elif [ "$2" = "docker-multiplatform" ]; then
+  elif [ "$dockerType" = "docker-multiplatform" ]; then
     BuildDockerMultiplatform
-  elif [ "$2" = "linux_musl_arm" ]; then
+  elif [ "$dockerType" = "linux_musl_arm" ]; then
     BuildReleaseLinuxMuslArm
     MakeRelease "md5-linux-musl-arm.txt"
-  elif [ "$2" = "linux_musl" ]; then
+  elif [ "$dockerType" = "linux_musl" ]; then
     BuildReleaseLinuxMusl
     MakeRelease "md5-linux-musl.txt"
-  elif [ "$2" = "android" ]; then
+  elif [ "$dockerType" = "android" ]; then
     BuildReleaseAndroid
     MakeRelease "md5-android.txt"
-  elif [ "$2" = "freebsd" ]; then
+  elif [ "$dockerType" = "freebsd" ]; then
     BuildReleaseFreeBSD
     MakeRelease "md5-freebsd.txt"
-  elif [ "$2" = "web" ]; then
+  elif [ "$dockerType" = "web" ]; then
     echo "web only"
   else
     BuildRelease
     MakeRelease "md5.txt"
   fi
-elif [ "$1" = "prepare" ]; then
-  if [ "$2" = "docker-multiplatform" ]; then
+elif [ "$buildType" = "prepare" ]; then
+  if [ "$dockerType" = "docker-multiplatform" ]; then
     PrepareBuildDockerMusl
   fi
-elif [ "$1" = "zip" ]; then
-  MakeRelease "$2".txt
+elif [ "$buildType" = "zip" ]; then
+  if [ -n "$otherParam" ]; then
+    MakeRelease "$otherParam".txt
+  elif [ -n "$dockerType" ]; then
+    MakeRelease "$dockerType".txt
+  else
+    MakeRelease "md5.txt"
+  fi
 else
   echo -e "Parameter error"
+  echo -e "Usage: $0 {dev|beta|release|zip|prepare} [docker|docker-multiplatform|linux_musl_arm|linux_musl|android|freebsd|web] [lite] [other_params]"
+  echo -e "Examples:"
+  echo -e "  $0 dev"
+  echo -e "  $0 dev lite"
+  echo -e "  $0 dev docker"
+  echo -e "  $0 dev docker lite"
+  echo -e "  $0 release"
+  echo -e "  $0 release lite"
+  echo -e "  $0 release docker lite"
 fi
