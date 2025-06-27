@@ -1,4 +1,4 @@
-name: beta release
+name: Beta Release builds
 
 on:
   push:
