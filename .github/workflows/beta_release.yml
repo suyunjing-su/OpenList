@@ -185,7 +185,7 @@ jobs:
           targets: ${{ matrix.target }}
           musl-target-format: $os-$musl-$arch
           out-dir: build
-          output: openlist-lite-$target$ext
+          output: openlist-$target$ext
           musl-base-url: "https://github.com/OpenListTeam/musl-compilers/releases/latest/download/"
           x-flags: |
             github.com/OpenListTeam/OpenList/internal/conf.BuiltAt=$built_at
@@ -196,7 +196,7 @@ jobs:
 
       - name: Compress
         run: |
-          bash build.sh zip ${{ matrix.hash }}
+          bash build.sh zip lite ${{ matrix.hash }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
