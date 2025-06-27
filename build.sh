@@ -350,9 +350,9 @@ MakeRelease() {
   done
   cd compress
   
-  # Add -lite suffix to MD5 filename if useLite is true
+  # Handle MD5 filename - add -lite suffix only if not already present
   md5FileName="$1"
-  if [ "$useLite" = true ]; then
+  if [ "$useLite" = true ] && [[ "$1" != *"-lite.txt" ]]; then
     md5FileName=$(echo "$1" | sed 's/\.txt$/-lite.txt/')
   fi
   
