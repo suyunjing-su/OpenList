@@ -25,7 +25,7 @@ concurrency:
 
 env:
   ORG_NAME: ${{ vars.DOCKERHUB_ORG_NAME || 'openlistteam' }}
-  IMAGE_NAME: ${{ vars.GHCR_IMAGE_NAME || 'openlist-git' }}
+  IMAGE_NAME: openlist-git
   IMAGE_NAME_DOCKERHUB: openlist
   REGISTRY: ghcr.io
   ARTIFACT_NAME: 'binaries_docker_release'
