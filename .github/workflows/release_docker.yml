@@ -24,7 +24,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ORG_NAME: ${{ vars.DOCKERHUB_ORG_NAME || 'openlistteam' }}
+  DOCKERHUB_ORG_NAME: ${{ vars.DOCKERHUB_ORG_NAME || 'openlistteam' }}
+  GHCR_ORG_NAME: ${{ vars.GHCR_ORG_NAME || 'openlistteam' }}
   IMAGE_NAME: openlist-git
   IMAGE_NAME_DOCKERHUB: openlist
   REGISTRY: ghcr.io
@@ -180,7 +181,7 @@ jobs:
         if: env.IMAGE_PUSH == 'true'
         uses: docker/login-action@v3
         with:
-          username: ${{ env.ORG_NAME }}
+          username: ${{ env.DOCKERHUB_ORG_NAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Docker meta
@@ -188,8 +189,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.REGISTRY }}/${{ github.actor }}/${{ env.IMAGE_NAME }}
-            ${{ env.ORG_NAME }}/${{ env.IMAGE_NAME_DOCKERHUB }}
+            ${{ env.REGISTRY }}/${{ env.GHCR_ORG_NAME }}/${{ env.IMAGE_NAME }}
+            ${{ env.DOCKERHUB_ORG_NAME }}/${{ env.IMAGE_NAME_DOCKERHUB }}
           tags: >
             ${{ env.IMAGE_IS_PROD == 'true' && (
               github.event_name == 'workflow_dispatch'
@@ -260,7 +261,7 @@ jobs:
         if: env.IMAGE_PUSH == 'true'
         uses: docker/login-action@v3
         with:
-          username: ${{ env.ORG_NAME }}
+          username: ${{ env.DOCKERHUB_ORG_NAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Docker meta
@@ -268,8 +269,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.REGISTRY }}/${{ github.actor }}/${{ env.IMAGE_NAME }}
-            ${{ env.ORG_NAME }}/${{ env.IMAGE_NAME_DOCKERHUB }}
+            ${{ env.REGISTRY }}/${{ env.GHCR_ORG_NAME }}/${{ env.IMAGE_NAME }}
+            ${{ env.DOCKERHUB_ORG_NAME }}/${{ env.IMAGE_NAME_DOCKERHUB }}
           tags: >
             ${{ env.IMAGE_IS_PROD == 'true' && (
               github.event_name == 'workflow_dispatch'
