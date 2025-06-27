@@ -223,7 +223,7 @@ jobs:
         include:
           - image: "latest"
             build_arg: ""
-            tag_favor: ""
+            tag_favor: "suffix=-lite,onlatest=true"
           - image: "ffmpeg"
             build_arg: INSTALL_FFMPEG=true
             tag_favor: "suffix=-lite-ffmpeg,onlatest=true"
