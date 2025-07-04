@@ -18,6 +18,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/OpenListTeam/tache"
+	"github.com/google/uuid"
 	"github.com/pkg/errors"
 )
 
@@ -51,7 +52,7 @@ func (t *CopyTask) Run() error {
 	// 注册任务到批量跟踪器
 	taskID := t.GetID()
 	if taskID == "" {
-		taskID = utils.RandomString(16)
+		taskID = uuid.NewString()
 	}
 	
 	var err error
