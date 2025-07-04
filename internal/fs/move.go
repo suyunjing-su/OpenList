@@ -134,7 +134,7 @@ func (t *MoveTask) Run() error {
 	taskID := fmt.Sprintf("%p", t)
 	
 	// Register task to batch tracker
-	batchMoveTracker.registerTask(taskID, t.dstStorage, t.DstDirPath)
+	batchMoveTrackerInstance.registerTask(taskID, t.dstStorage, t.DstDirPath)
 
 	// Phase 1: Async validation (all validation happens in background)
 	t.mu.Lock()
@@ -145,7 +145,7 @@ func (t *MoveTask) Run() error {
 	srcObj, err := op.Get(t.Ctx(), t.srcStorage, t.SrcObjPath)
 	if err != nil {
 		// Clean up tracker records if task failed
-		batchMoveTracker.markTaskCompleted(taskID)
+		batchMoveTrackerInstance.markTaskCompleted(taskID)
 		return errors.WithMessagef(err, "source file [%s] not found", stdpath.Base(t.SrcObjPath))
 	}
 
@@ -154,7 +154,7 @@ func (t *MoveTask) Run() error {
 		dstFilePath := stdpath.Join(t.DstDirPath, srcObj.GetName())
 		if res, _ := op.Get(t.Ctx(), t.dstStorage, dstFilePath); res != nil {
 			// Clean up tracker records if task failed
-			batchMoveTracker.markTaskCompleted(taskID)
+			batchMoveTrackerInstance.markTaskCompleted(taskID)
 			return errors.Errorf("destination file [%s] already exists", srcObj.GetName())
 		}
 	}
@@ -174,13 +174,13 @@ func (t *MoveTask) Run() error {
 
 	// Mark task completed and check if cache refresh is needed
 	if err == nil {
-		shouldRefresh, dstStorage, dstDirPath := batchMoveTracker.markTaskCompleted(taskID)
+		shouldRefresh, dstStorage, dstDirPath := batchMoveTrackerInstance.markTaskCompleted(taskID)
 		if shouldRefresh {
 			op.ClearCache(dstStorage, dstDirPath)
 		}
 	} else {
 		// Clean up tracker records even if task failed
-		batchMoveTracker.markTaskCompleted(taskID)
+		batchMoveTrackerInstance.markTaskCompleted(taskID)
 	}
 
 	return err
@@ -282,7 +282,7 @@ type moveDirTaskInfo struct {
 	lastActivity   time.Time       // last activity time (used for detecting abnormal situations)
 }
 
-var batchMoveTracker = &batchMoveTracker{
+var batchMoveTrackerInstance = &batchMoveTracker{
 	dirTasks:     make(map[string]*moveDirTaskInfo),
 	pendingTasks: make(map[string]string),
 	lastCleanup:  time.Now(),
