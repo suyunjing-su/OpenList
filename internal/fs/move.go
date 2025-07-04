@@ -134,7 +134,7 @@ func (t *MoveTask) Run() error {
 	taskID := fmt.Sprintf("%p", t)
 	
 	// Register task to batch tracker
-	batchMoveTrackerInstance.registerTask(taskID, t.dstStorage, t.DstDirPath)
+	moveBatchTracker.RegisterTask(taskID, t.dstStorage, t.DstDirPath)
 
 	// Phase 1: Async validation (all validation happens in background)
 	t.mu.Lock()
@@ -145,7 +145,7 @@ func (t *MoveTask) Run() error {
 	srcObj, err := op.Get(t.Ctx(), t.srcStorage, t.SrcObjPath)
 	if err != nil {
 		// Clean up tracker records if task failed
-		batchMoveTrackerInstance.markTaskCompleted(taskID)
+		moveBatchTracker.MarkTaskCompletedWithRefresh(taskID)
 		return errors.WithMessagef(err, "source file [%s] not found", stdpath.Base(t.SrcObjPath))
 	}
 
@@ -154,7 +154,7 @@ func (t *MoveTask) Run() error {
 		dstFilePath := stdpath.Join(t.DstDirPath, srcObj.GetName())
 		if res, _ := op.Get(t.Ctx(), t.dstStorage, dstFilePath); res != nil {
 			// Clean up tracker records if task failed
-			batchMoveTrackerInstance.markTaskCompleted(taskID)
+			moveBatchTracker.MarkTaskCompletedWithRefresh(taskID)
 			return errors.Errorf("destination file [%s] already exists", srcObj.GetName())
 		}
 	}
@@ -172,16 +172,8 @@ func (t *MoveTask) Run() error {
 		err = t.safeMoveOperation(srcObj)
 	}
 
-	// Mark task completed and check if cache refresh is needed
-	if err == nil {
-		shouldRefresh, dstStorage, dstDirPath := batchMoveTrackerInstance.markTaskCompleted(taskID)
-		if shouldRefresh {
-			op.ClearCache(dstStorage, dstDirPath)
-		}
-	} else {
-		// Clean up tracker records even if task failed
-		batchMoveTrackerInstance.markTaskCompleted(taskID)
-	}
+	// Mark task completed and automatically refresh cache if needed
+	moveBatchTracker.MarkTaskCompletedWithRefresh(taskID)
 
 	return err
 }
@@ -259,127 +251,14 @@ func (t *MoveTask) runRootMoveTask() error {
 	t.mu.Unlock()
 	t.updateProgress()
 
-	// Refresh target directory cache after successful root move task
-	op.ClearCache(t.dstStorage, t.DstDirPath)
-
+	
 	return nil
 }
 
 var MoveTaskManager *tache.Manager[*MoveTask]
 
-// Batch move task tracker - aggregates all move tasks by target directory
-type batchMoveTracker struct {
-	mu           sync.Mutex
-	dirTasks     map[string]*moveDirTaskInfo // dstStoragePath+dstDirPath -> moveDirTaskInfo
-	pendingTasks map[string]string           // taskID -> dstStoragePath+dstDirPath
-	lastCleanup  time.Time                   // last cleanup time
-}
-
-type moveDirTaskInfo struct {
-	dstStorage     driver.Driver
-	dstDirPath     string
-	pendingTasks   map[string]bool // taskID -> true
-	lastActivity   time.Time       // last activity time (used for detecting abnormal situations)
-}
-
-var batchMoveTrackerInstance = &batchMoveTracker{
-	dirTasks:     make(map[string]*moveDirTaskInfo),
-	pendingTasks: make(map[string]string),
-	lastCleanup:  time.Now(),
-}
-
-// Generate unique key for target directory
-func (bt *batchMoveTracker) getDirKey(dstStorage driver.Driver, dstDirPath string) string {
-	return dstStorage.GetStorage().MountPath + ":" + dstDirPath
-}
-
-// Register move task to target directory
-func (bt *batchMoveTracker) registerTask(taskID string, dstStorage driver.Driver, dstDirPath string) {
-	bt.mu.Lock()
-	defer bt.mu.Unlock()
-	
-	// Periodically clean up expired entries
-	bt.cleanupIfNeeded()
-	
-	dirKey := bt.getDirKey(dstStorage, dstDirPath)
-	
-	// Record task to directory mapping
-	bt.pendingTasks[taskID] = dirKey
-	
-	// Initialize or update directory task information
-	if info, exists := bt.dirTasks[dirKey]; exists {
-		info.pendingTasks[taskID] = true
-		info.lastActivity = time.Now()
-	} else {
-		bt.dirTasks[dirKey] = &moveDirTaskInfo{
-			dstStorage:   dstStorage,
-			dstDirPath:   dstDirPath,
-			pendingTasks: map[string]bool{taskID: true},
-			lastActivity: time.Now(),
-		}
-	}
-}
-
-// Mark task completed, return whether cache refresh is needed
-func (bt *batchMoveTracker) markTaskCompleted(taskID string) (bool, driver.Driver, string) {
-	bt.mu.Lock()
-	defer bt.mu.Unlock()
-	
-	dirKey, exists := bt.pendingTasks[taskID]
-	if !exists {
-		return false, nil, ""
-	}
-	
-	// Remove from pending tasks
-	delete(bt.pendingTasks, taskID)
-	
-	info, exists := bt.dirTasks[dirKey]
-	if !exists {
-		return false, nil, ""
-	}
-	
-	// Remove from directory tasks
-	delete(info.pendingTasks, taskID)
-	
-	// If no pending tasks left in this directory, trigger cache refresh
-	if len(info.pendingTasks) == 0 {
-		dstStorage := info.dstStorage
-		dstDirPath := info.dstDirPath
-		delete(bt.dirTasks, dirKey)  // Delete directly, no need to update lastActivity
-		return true, dstStorage, dstDirPath
-	}
-	
-	// Only update lastActivity when there are other tasks (indicating the directory still has active tasks)
-	info.lastActivity = time.Now()
-	return false, nil, ""
-}
-
-// Check if cleanup is needed, execute cleanup if necessary
-func (bt *batchMoveTracker) cleanupIfNeeded() {
-	now := time.Now()
-	// Clean up every 10 minutes
-	if now.Sub(bt.lastCleanup) > 10*time.Minute {
-		bt.cleanupStaleEntries()
-		bt.lastCleanup = now
-	}
-}
-
-// Clean up timed-out tasks (prevent memory leaks)
-// Mainly used to clean up residual entries caused by abnormal situations (such as task crashes, process restarts, etc.)
-func (bt *batchMoveTracker) cleanupStaleEntries() {
-	now := time.Now()
-	for dirKey, info := range bt.dirTasks {
-		// If no activity for more than 1 hour, it may indicate an abnormal situation, clean up this entry
-		// Under normal circumstances, markTaskCompleted will be called when the task is completed and the entire entry will be deleted
-		if now.Sub(info.lastActivity) > time.Hour {
-			// Clean up related pending tasks
-			for taskID := range info.pendingTasks {
-				delete(bt.pendingTasks, taskID)
-			}
-			delete(bt.dirTasks, dirKey)
-		}
-	}
-}
+// Batch tracker for move operations
+var moveBatchTracker = NewBatchTracker("move")
 
 // GetMoveProgress returns the progress of a move task by task ID
 func GetMoveProgress(taskID string) (*MoveProgress, bool) {
@@ -655,9 +534,7 @@ func moveBetween2Storages(t *MoveTask, srcStorage, dstStorage driver.Driver, src
 			t.Status = "completed"
 		}
 		
-		// Refresh target directory cache after successful directory move
-		op.ClearCache(dstStorage, dstDirPath)
-		
+				
 		return nil
 	} else {
 		return moveFileBetween2Storages(t, srcStorage, dstStorage, srcObjPath, dstDirPath)
@@ -699,9 +576,7 @@ func moveFileBetween2Storages(tsk *MoveTask, srcStorage, dstStorage driver.Drive
 		return errors.WithMessagef(err, "failed to delete src [%s] file from storage [%s] after successful copy", srcFilePath, srcStorage.GetStorage().MountPath)
 	}
 
-	// For single file moves, refresh cache immediately since there's no batching needed
-	op.ClearCache(dstStorage, dstDirPath)
-
+	
 	tsk.SetProgress(100)
 	tsk.Status = "completed"
 	return nil
@@ -737,7 +612,7 @@ func _moveWithValidation(ctx context.Context, srcObjPath, dstDirPath string, val
 		err = op.Move(ctx, srcStorage, srcObjActualPath, dstDirActualPath, lazyCache...)
 		if !errors.Is(err, errs.NotImplement) && !errors.Is(err, errs.NotSupport) {
 			if err == nil {
-				// Refresh target directory cache after successful same-storage move
+				// For same-storage moves, refresh cache immediately since no batch tracking is used
 				op.ClearCache(dstStorage, dstDirActualPath)
 			}
 			return nil, err
