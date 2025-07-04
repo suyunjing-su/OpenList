@@ -18,7 +18,6 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/OpenListTeam/tache"
-	"github.com/google/uuid"
 	"github.com/pkg/errors"
 )
 
@@ -49,12 +48,6 @@ func (t *CopyTask) Run() error {
 	t.SetStartTime(time.Now())
 	defer func() { t.SetEndTime(time.Now()) }()
 	
-	// 注册任务到批量跟踪器
-	taskID := t.GetID()
-	if taskID == "" {
-		taskID = uuid.NewString()
-	}
-	
 	var err error
 	if t.srcStorage == nil {
 		t.srcStorage, err = op.GetStorageByMountPath(t.SrcStorageMp)
@@ -66,13 +59,16 @@ func (t *CopyTask) Run() error {
 		return errors.WithMessage(err, "failed get storage")
 	}
 	
+	// 使用任务对象的内存地址作为唯一标识符
+	taskID := fmt.Sprintf("%p", t)
+	
 	// 注册任务到批量跟踪器
 	batchTracker.registerTask(taskID, t.dstStorage, t.DstDirPath)
 	
 	// 执行复制操作
 	err = copyBetween2Storages(t, t.srcStorage, t.dstStorage, t.SrcObjPath, t.DstDirPath)
 	
-	// 标记任务完成并检查是否需要刷新缓存
+	// 标记任务完��并检查是否需要刷新缓存
 	if err == nil {
 		shouldRefresh, dstStorage, dstDirPath := batchTracker.markTaskCompleted(taskID)
 		if shouldRefresh {
@@ -93,18 +89,20 @@ type batchCopyTracker struct {
 	mu           sync.Mutex
 	dirTasks     map[string]*dirTaskInfo // dstStoragePath+dstDirPath -> dirTaskInfo
 	pendingTasks map[string]string       // taskID -> dstStoragePath+dstDirPath
+	lastCleanup  time.Time               // 上次清理时间
 }
 
 type dirTaskInfo struct {
 	dstStorage     driver.Driver
 	dstDirPath     string
 	pendingTasks   map[string]bool // taskID -> true
-	lastActivity   time.Time       // 最后活动时间
+	lastActivity   time.Time       // 最后活动时间（用于检测异常情况）
 }
 
 var batchTracker = &batchCopyTracker{
 	dirTasks:     make(map[string]*dirTaskInfo),
 	pendingTasks: make(map[string]string),
+	lastCleanup:  time.Now(),
 }
 
 // 生成目标目录的唯一键
@@ -116,6 +114,9 @@ func (bt *batchCopyTracker) getDirKey(dstStorage driver.Driver, dstDirPath strin
 func (bt *batchCopyTracker) registerTask(taskID string, dstStorage driver.Driver, dstDirPath string) {
 	bt.mu.Lock()
 	defer bt.mu.Unlock()
+	
+	// 定期清理过期条目
+	bt.cleanupIfNeeded()
 	
 	dirKey := bt.getDirKey(dstStorage, dstDirPath)
 	
@@ -156,27 +157,37 @@ func (bt *batchCopyTracker) markTaskCompleted(taskID string) (bool, driver.Drive
 	
 	// 从目录任务中移除
 	delete(info.pendingTasks, taskID)
-	info.lastActivity = time.Now()
 	
 	// 如果该目录下没有待处理的任务了，触发缓存刷新
 	if len(info.pendingTasks) == 0 {
 		dstStorage := info.dstStorage
 		dstDirPath := info.dstDirPath
-		delete(bt.dirTasks, dirKey)
+		delete(bt.dirTasks, dirKey)  // 直接删除，不需要更新lastActivity
 		return true, dstStorage, dstDirPath
 	}
 	
+	// 只有当还有其他任务时才更新lastActivity（表示该目录仍有活跃任务）
+	info.lastActivity = time.Now()
 	return false, nil, ""
 }
 
-// 清理超时的任务（可选的清理机制，防止内存泄漏）
+// 检查是否需要清理，如果需要则执行清理
+func (bt *batchCopyTracker) cleanupIfNeeded() {
+	now := time.Now()
+	// 每10分钟清理一次
+	if now.Sub(bt.lastCleanup) > 10*time.Minute {
+		bt.cleanupStaleEntries()
+		bt.lastCleanup = now
+	}
+}
+
+// 清理超时的任务（防止内存泄漏）
+// 主要用于清理因异常情况（如任务崩溃、进程重启等）导致的残留条目
 func (bt *batchCopyTracker) cleanupStaleEntries() {
-	bt.mu.Lock()
-	defer bt.mu.Unlock()
-	
 	now := time.Now()
 	for dirKey, info := range bt.dirTasks {
-		// 如果超过1小时没有活动，清理该条目
+		// 如果超过1小时没有活动，说明可能出现了异常情况，清理该条目
+		// 正常情况下，任务完成时会调用markTaskCompleted并删除整个条目
 		if now.Sub(info.lastActivity) > time.Hour {
 			// 清理相关的待处理任务
 			for taskID := range info.pendingTasks {
