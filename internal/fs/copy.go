@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	stdpath "path"
+	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
@@ -46,6 +47,13 @@ func (t *CopyTask) Run() error {
 	t.ClearEndTime()
 	t.SetStartTime(time.Now())
 	defer func() { t.SetEndTime(time.Now()) }()
+	
+	// 注册任务到批量跟踪器
+	taskID := t.GetID()
+	if taskID == "" {
+		taskID = utils.RandomString(16)
+	}
+	
 	var err error
 	if t.srcStorage == nil {
 		t.srcStorage, err = op.GetStorageByMountPath(t.SrcStorageMp)
@@ -56,10 +64,127 @@ func (t *CopyTask) Run() error {
 	if err != nil {
 		return errors.WithMessage(err, "failed get storage")
 	}
-	return copyBetween2Storages(t, t.srcStorage, t.dstStorage, t.SrcObjPath, t.DstDirPath)
+	
+	// 注册任务到批量跟踪器
+	batchTracker.registerTask(taskID, t.dstStorage, t.DstDirPath)
+	
+	// 执行复制操作
+	err = copyBetween2Storages(t, t.srcStorage, t.dstStorage, t.SrcObjPath, t.DstDirPath)
+	
+	// 标记任务完成并检查是否需要刷新缓存
+	if err == nil {
+		shouldRefresh, dstStorage, dstDirPath := batchTracker.markTaskCompleted(taskID)
+		if shouldRefresh {
+			op.ClearCache(dstStorage, dstDirPath)
+		}
+	} else {
+		// 即使失败也要清理跟踪器中的记录
+		batchTracker.markTaskCompleted(taskID)
+	}
+	
+	return err
 }
 
 var CopyTaskManager *tache.Manager[*CopyTask]
+
+// 批量复制任务跟踪器 - 按目标目录聚合所有复制任务
+type batchCopyTracker struct {
+	mu           sync.Mutex
+	dirTasks     map[string]*dirTaskInfo // dstStoragePath+dstDirPath -> dirTaskInfo
+	pendingTasks map[string]string       // taskID -> dstStoragePath+dstDirPath
+}
+
+type dirTaskInfo struct {
+	dstStorage     driver.Driver
+	dstDirPath     string
+	pendingTasks   map[string]bool // taskID -> true
+	lastActivity   time.Time       // 最后活动时间
+}
+
+var batchTracker = &batchCopyTracker{
+	dirTasks:     make(map[string]*dirTaskInfo),
+	pendingTasks: make(map[string]string),
+}
+
+// 生成目标目录的唯一键
+func (bt *batchCopyTracker) getDirKey(dstStorage driver.Driver, dstDirPath string) string {
+	return dstStorage.GetStorage().MountPath + ":" + dstDirPath
+}
+
+// 注册复制任务到目标目录
+func (bt *batchCopyTracker) registerTask(taskID string, dstStorage driver.Driver, dstDirPath string) {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	
+	dirKey := bt.getDirKey(dstStorage, dstDirPath)
+	
+	// 记录任务到目录的映射
+	bt.pendingTasks[taskID] = dirKey
+	
+	// 初始化或更新目录任务信息
+	if info, exists := bt.dirTasks[dirKey]; exists {
+		info.pendingTasks[taskID] = true
+		info.lastActivity = time.Now()
+	} else {
+		bt.dirTasks[dirKey] = &dirTaskInfo{
+			dstStorage:   dstStorage,
+			dstDirPath:   dstDirPath,
+			pendingTasks: map[string]bool{taskID: true},
+			lastActivity: time.Now(),
+		}
+	}
+}
+
+// 标记任务完成，返回是否需要刷新缓存
+func (bt *batchCopyTracker) markTaskCompleted(taskID string) (bool, driver.Driver, string) {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	
+	dirKey, exists := bt.pendingTasks[taskID]
+	if !exists {
+		return false, nil, ""
+	}
+	
+	// 从待处理任务中移除
+	delete(bt.pendingTasks, taskID)
+	
+	info, exists := bt.dirTasks[dirKey]
+	if !exists {
+		return false, nil, ""
+	}
+	
+	// 从目录任务中移除
+	delete(info.pendingTasks, taskID)
+	info.lastActivity = time.Now()
+	
+	// 如果该目录下没有待处理的任务了，触发缓存刷新
+	if len(info.pendingTasks) == 0 {
+		dstStorage := info.dstStorage
+		dstDirPath := info.dstDirPath
+		delete(bt.dirTasks, dirKey)
+		return true, dstStorage, dstDirPath
+	}
+	
+	return false, nil, ""
+}
+
+// 清理超时的任务（可选的清理机制，防止内存泄漏）
+func (bt *batchCopyTracker) cleanupStaleEntries() {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	
+	now := time.Now()
+	for dirKey, info := range bt.dirTasks {
+		// 如果超过1小时没有活动，清理该条目
+		if now.Sub(info.lastActivity) > time.Hour {
+			// 清理相关的待处理任务
+			for taskID := range info.pendingTasks {
+				delete(bt.pendingTasks, taskID)
+			}
+			delete(bt.dirTasks, dirKey)
+		}
+	}
+}
 
 // Copy if in the same storage, call move method
 // if not, add copy task
@@ -76,6 +201,10 @@ func _copy(ctx context.Context, srcObjPath, dstDirPath string, lazyCache ...bool
 	if srcStorage.GetStorage() == dstStorage.GetStorage() {
 		err = op.Copy(ctx, srcStorage, srcObjActualPath, dstDirActualPath, lazyCache...)
 		if !errors.Is(err, errs.NotImplement) && !errors.Is(err, errs.NotSupport) {
+			if err == nil {
+				// 同存储复制成功后刷新目标目录缓存
+				op.ClearCache(dstStorage, dstDirActualPath)
+			}
 			return nil, err
 		}
 	}
@@ -101,7 +230,12 @@ func _copy(ctx context.Context, srcObjPath, dstDirPath string, lazyCache ...bool
 			if err != nil {
 				return nil, errors.WithMessagef(err, "failed get [%s] stream", srcObjPath)
 			}
-			return nil, op.Put(ctx, dstStorage, dstDirActualPath, ss, nil, false)
+			err = op.Put(ctx, dstStorage, dstDirActualPath, ss, nil, false)
+			if err == nil {
+				// 直接文件复制成功后刷新目标目录缓存
+				op.ClearCache(dstStorage, dstDirActualPath)
+			}
+			return nil, err
 		}
 	}
 	// not in the same storage
@@ -134,6 +268,7 @@ func copyBetween2Storages(t *CopyTask, srcStorage, dstStorage driver.Driver, src
 		if err != nil {
 			return errors.WithMessagef(err, "failed list src [%s] objs", srcObjPath)
 		}
+		
 		for _, obj := range objs {
 			if utils.IsCanceled(t.Ctx()) {
 				return nil
