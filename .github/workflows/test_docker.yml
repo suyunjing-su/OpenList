@@ -1,4 +1,4 @@
-name: Beta Release(Docker)
+name: Beta Release (Docker)
 
 on:
   workflow_dispatch:
