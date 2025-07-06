@@ -179,7 +179,7 @@ jobs:
                 && format('type=raw,value={0}', github.event.inputs.manual_tag)
               || format('type=raw,value={0}', github.ref_name) }}
           flavor: |
-            latest=${{ github.event.inputs.as_latest == 'true' }}
+            latest=${{ github.event_name == 'push' || github.event.inputs.as_latest == 'true' }}
             ${{ matrix.tag_favor }}
 
       - name: Build and push
@@ -257,7 +257,7 @@ jobs:
                 && format('type=raw,value={0}', github.event.inputs.manual_tag)
               || format('type=raw,value={0}', github.ref_name) }}
           flavor: |
-            latest=${{ github.event.inputs.as_latest == 'true' }}
+            latest=${{ github.event_name == 'push' || github.event.inputs.as_latest == 'true' }}
             ${{ matrix.tag_favor }}
 
       - name: Build and push
