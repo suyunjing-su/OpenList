@@ -1,4 +1,4 @@
-name: Docker Beta Release
+name: Beta Release(Docker)
 
 on:
   workflow_dispatch:
@@ -29,7 +29,7 @@ env:
 
 jobs:
   build_binary:
-    name: Build Binaries for Docker Release
+    name: Build Binaries for Docker Release (Beta)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -69,7 +69,7 @@ jobs:
 
   release_docker:
     needs: build_binary
-    name: Release Docker image
+    name: Release Docker image (Beta)
     runs-on: ubuntu-latest
     permissions:
       packages: write
