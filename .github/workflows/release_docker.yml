@@ -164,7 +164,7 @@ jobs:
         if: env.IMAGE_PUSH == 'true'
         uses: docker/login-action@v3
         with:
-          username: ${{ env.DOCKERHUB_ORG_NAME }}
+          username: ${{ vars.DOCKERHUB_ORG_NAME_BACKUP || env.DOCKERHUB_ORG_NAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Docker meta
@@ -242,7 +242,7 @@ jobs:
         if: env.IMAGE_PUSH == 'true'
         uses: docker/login-action@v3
         with:
-          username: ${{ env.DOCKERHUB_ORG_NAME }}
+          username: ${{ vars.DOCKERHUB_ORG_NAME_BACKUP || env.DOCKERHUB_ORG_NAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Docker meta
