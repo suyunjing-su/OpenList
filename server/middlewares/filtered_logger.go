@@ -31,9 +31,11 @@ func FilteredLoggerWithConfig(config FilteredLoggerConfig) gin.HandlerFunc {
 
 	return gin.LoggerWithConfig(gin.LoggerConfig{
 		Output: config.Output,
-		SkipPaths: config.SkipPaths,
+		// Don't use Gin's built-in SkipPaths as it only does exact string matching
+		// We'll handle all filtering in our custom formatter
+		SkipPaths: nil,
 		Formatter: func(param gin.LogFormatterParams) string {
-			// Skip logging for health check endpoints
+			// Skip logging based on our custom filtering logic
 			if shouldSkipLogging(param.Path, param.Method, config) {
 				return ""
 			}
@@ -47,7 +49,7 @@ func FilteredLoggerWithConfig(config FilteredLoggerConfig) gin.HandlerFunc {
 
 // shouldSkipLogging determines if a request should be skipped from logging
 func shouldSkipLogging(path, method string, config FilteredLoggerConfig) bool {
-	// Check if path should be skipped
+	// Check if path should be skipped (exact match)
 	for _, skipPath := range config.SkipPaths {
 		if path == skipPath {
 			return true
@@ -66,11 +68,6 @@ func shouldSkipLogging(path, method string, config FilteredLoggerConfig) bool {
 		if strings.HasPrefix(path, skipPrefix) {
 			return true
 		}
-	}
-
-	// Special case: Skip PROPFIND requests (common in WebDAV)
-	if method == "PROPFIND" {
-		return true
 	}
 
 	return false
