@@ -258,7 +258,19 @@ BuildLoongGLIBC() {
   # Force clean Go build cache to prevent ABI cross-contamination
   echo "Cleaning Go build cache to prevent ABI1.0/ABI2.0 cross-contamination..."
   go clean -cache
-  go clean -modcache || true  # Don't fail if modcache clean fails
+  # Try to clean modcache, but handle permission issues gracefully
+  if ! go clean -modcache 2>/dev/null; then
+    echo "Warning: Could not clean module cache due to permissions, trying alternative approach..."
+    # Try to fix permissions and clean again
+    if [ -n "$GOPATH" ] && [ -d "$GOPATH/pkg/mod" ]; then
+      chmod -R u+w "$GOPATH/pkg/mod" 2>/dev/null || true
+      go clean -modcache 2>/dev/null || true
+    elif [ -d "$HOME/go/pkg/mod" ]; then
+      chmod -R u+w "$HOME/go/pkg/mod" 2>/dev/null || true
+      go clean -modcache 2>/dev/null || true
+    fi
+    echo "Continuing with build despite modcache clean issues..."
+  fi
   
   if [ "$target_abi" = "abi1.0" ]; then
     # Setup abi1.0 toolchain similar to cgo-action implementation
