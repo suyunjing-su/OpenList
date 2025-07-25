@@ -95,6 +95,45 @@ BuildWinArm64() {
   go build -o "$1" -ldflags="$ldflags" -tags=jsoniter .
 }
 
+BuildWin7() {
+  # Setup Win7 Go compiler (patched version that supports Windows 7)
+  go_version=$(go version | grep -o 'go[0-9]\+\.[0-9]\+\.[0-9]\+' | sed 's/go//')
+  echo "Detected Go version: $go_version"
+  
+  curl -fsSL --retry 3 -o go-win7.zip -H "Authorization: Bearer $GITHUB_TOKEN" \
+    "https://github.com/XTLS/go-win7/releases/download/patched-${go_version}/go-for-win7-linux-amd64.zip"
+  
+  rm -rf go-win7
+  unzip go-win7.zip -d go-win7
+  rm go-win7.zip
+  
+  # Set permissions for all wrapper files
+  chmod +x ./wrapper/zcc-win7
+  chmod +x ./wrapper/zcxx-win7
+  chmod +x ./wrapper/zcc-win7-386
+  chmod +x ./wrapper/zcxx-win7-386
+  
+  # Build for both 386 and amd64 architectures
+  for arch in "386" "amd64"; do
+    echo "building for windows-7-${arch}"
+    export GOOS=windows
+    export GOARCH=${arch}
+    export CGO_ENABLED=1
+    
+    # Use architecture-specific wrapper files
+    if [ "$arch" = "386" ]; then
+      export CC=$(pwd)/wrapper/zcc-win7-386
+      export CXX=$(pwd)/wrapper/zcxx-win7-386
+    else
+      export CC=$(pwd)/wrapper/zcc-win7
+      export CXX=$(pwd)/wrapper/zcxx-win7
+    fi
+    
+    # Use the patched Go compiler for Win7 compatibility
+    $(pwd)/go-win7/bin/go build -o "${1}-${arch}.exe" -ldflags="$ldflags" -tags=jsoniter .
+  done
+}
+
 BuildDev() {
   rm -rf .git/
   mkdir -p "dist"
@@ -186,12 +225,32 @@ BuildRelease() {
   rm -rf .git/
   mkdir -p "build"
   BuildWinArm64 ./build/"$appName"-windows-arm64.exe
+  BuildWin7 ./build/"$appName"-windows-7
   xgo -out "$appName" -ldflags="$ldflags" -tags=jsoniter .
   # why? Because some target platforms seem to have issues with upx compression
   # upx -9 ./"$appName"-linux-amd64
   # cp ./"$appName"-windows-amd64.exe ./"$appName"-windows-amd64-upx.exe
   # upx -9 ./"$appName"-windows-amd64-upx.exe
   mv "$appName"-* build
+}
+
+BuildLoongOldWorld() {
+  echo building for linux-loong64-abi1.0
+  # Setup abi1.0 toolchain similar to cgo-action implementation
+  curl -fsSL --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" \
+    https://github.com/loong64/loong64-abi1.0-toolchains/releases/download/20250722/loongson-gnu-toolchain-8.3.novec-x86_64-loongarch64-linux-gnu-rc1.1.tar.xz \
+    -o gcc8-loong64-abi1.0.tar.xz
+  rm -rf gcc8-loong64-abi1.0
+  mkdir gcc8-loong64-abi1.0
+  tar -Jxf gcc8-loong64-abi1.0.tar.xz -C gcc8-loong64-abi1.0 --strip-components=1
+  rm gcc8-loong64-abi1.0.tar.xz
+  
+  export GOOS=linux
+  export GOARCH=loong64
+  export CC=$(pwd)/gcc8-loong64-abi1.0/bin/loongarch64-linux-gnu-gcc
+  export CXX=$(pwd)/gcc8-loong64-abi1.0/bin/loongarch64-linux-gnu-g++
+  export CGO_ENABLED=1
+  go build -o "$1" -ldflags="$ldflags" -tags=jsoniter .
 }
 
 BuildReleaseLinuxMusl() {
@@ -218,6 +277,9 @@ BuildReleaseLinuxMusl() {
     export CGO_ENABLED=1
     go build -o ./build/$appName-$os_arch -ldflags="$muslflags" -tags=jsoniter .
   done
+  
+  # Build Loongson old world (abi1.0) - cannot use musl, needs special toolchain
+  BuildLoongOldWorld ./build/$appName-linux-loong64-abi1.0
 }
 
 BuildReleaseLinuxMuslArm() {
@@ -248,6 +310,7 @@ BuildReleaseLinuxMuslArm() {
     go build -o ./build/$appName-$os_arch -ldflags="$muslflags" -tags=jsoniter .
   done
 }
+
 
 BuildReleaseAndroid() {
   rm -rf .git/
@@ -484,4 +547,5 @@ else
   echo -e "  $0 release"
   echo -e "  $0 release lite"
   echo -e "  $0 release docker lite"
+  echo -e "  $0 release linux_musl"
 fi
