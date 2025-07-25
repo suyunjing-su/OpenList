@@ -237,6 +237,11 @@ BuildRelease() {
   # cp ./"$appName"-windows-amd64.exe ./"$appName"-windows-amd64-upx.exe
   # upx -9 ./"$appName"-windows-amd64-upx.exe
   mv "$appName"-* build
+  
+  # Build LoongArch with glibc (both old world abi1.0 and new world abi2.0)
+  # Separate from musl builds to avoid cache conflicts
+  BuildLoongGLIBC ./build/$appName-linux-loong64-abi1.0 abi1.0
+  BuildLoongGLIBC ./build/$appName-linux-loong64 abi2.0
 }
 
 BuildLoongGLIBC() {
@@ -316,21 +321,8 @@ BuildReleaseLinuxMusl() {
     export GOARCH=${os_arch##*-}
     export CC=${cgo_cc}
     export CGO_ENABLED=1
-    
-    # Special handling for LoongArch to prevent ABI cross-contamination
-    if [[ "$os_arch" == *"loong64"* ]]; then
-      echo "Cleaning Go build cache before LoongArch ABI2.0 build to prevent ABI cross-contamination..."
-      go clean -cache
-      go build -a -o ./build/$appName-$os_arch -ldflags="$muslflags" -tags=jsoniter .
-    else
-      go build -o ./build/$appName-$os_arch -ldflags="$muslflags" -tags=jsoniter .
-    fi
+    go build -o ./build/$appName-$os_arch -ldflags="$muslflags" -tags=jsoniter .
   done
-  
-  # Build LoongArch with glibc (both old world abi1.0 and new world abi2.0)
-  # Cannot use musl for these builds, need special glibc toolchains
-  BuildLoongGLIBC ./build/$appName-linux-loong64-abi1.0 abi1.0
-  BuildLoongGLIBC ./build/$appName-linux-loong64 abi2.0
 }
 
 BuildReleaseLinuxMuslArm() {
