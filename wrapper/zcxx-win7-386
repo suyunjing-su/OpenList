@@ -1,2 +1,2 @@
 #!/bin/sh
-zig c++ -target x86-windows-gnu $@
+i686-w64-mingw32-g++ $@

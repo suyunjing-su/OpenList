@@ -96,6 +96,11 @@ BuildWinArm64() {
 }
 
 BuildWin7() {
+  # Install MinGW-w64 cross-compilation toolchain for Win7 compatibility
+  echo "Installing MinGW-w64 toolchain for Windows 7 compatibility..."
+  sudo apt-get update
+  sudo apt-get install -y gcc-mingw-w64-x86-64 gcc-mingw-w64-i686
+  
   # Setup Win7 Go compiler (patched version that supports Windows 7)
   go_version=$(go version | grep -o 'go[0-9]\+\.[0-9]\+\.[0-9]\+' | sed 's/go//')
   echo "Detected Go version: $go_version"
@@ -236,6 +241,12 @@ BuildRelease() {
 
 BuildLoongOldWorld() {
   echo building for linux-loong64-abi1.0
+  
+  # Force clean Go build cache to prevent ABI cross-contamination
+  echo "Cleaning Go build cache to prevent ABI1.0/ABI2.0 cross-contamination..."
+  go clean -cache
+  go clean -modcache || true  # Don't fail if modcache clean fails
+  
   # Setup abi1.0 toolchain similar to cgo-action implementation
   curl -fsSL --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" \
     https://github.com/loong64/loong64-abi1.0-toolchains/releases/download/20250722/loongson-gnu-toolchain-8.3.novec-x86_64-loongarch64-linux-gnu-rc1.1.tar.xz \
@@ -250,7 +261,9 @@ BuildLoongOldWorld() {
   export CC=$(pwd)/gcc8-loong64-abi1.0/bin/loongarch64-linux-gnu-gcc
   export CXX=$(pwd)/gcc8-loong64-abi1.0/bin/loongarch64-linux-gnu-g++
   export CGO_ENABLED=1
-  go build -o "$1" -ldflags="$ldflags" -tags=jsoniter .
+  
+  # Force rebuild without cache to ensure ABI1.0 compatibility
+  go build -a -o "$1" -ldflags="$ldflags" -tags=jsoniter .
 }
 
 BuildReleaseLinuxMusl() {
@@ -275,7 +288,15 @@ BuildReleaseLinuxMusl() {
     export GOARCH=${os_arch##*-}
     export CC=${cgo_cc}
     export CGO_ENABLED=1
-    go build -o ./build/$appName-$os_arch -ldflags="$muslflags" -tags=jsoniter .
+    
+    # Special handling for LoongArch to prevent ABI cross-contamination
+    if [[ "$os_arch" == *"loong64"* ]]; then
+      echo "Cleaning Go build cache before LoongArch ABI2.0 build to prevent ABI cross-contamination..."
+      go clean -cache
+      go build -a -o ./build/$appName-$os_arch -ldflags="$muslflags" -tags=jsoniter .
+    else
+      go build -o ./build/$appName-$os_arch -ldflags="$muslflags" -tags=jsoniter .
+    fi
   done
   
   # Build Loongson old world (abi1.0) - cannot use musl, needs special toolchain
