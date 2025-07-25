@@ -239,31 +239,59 @@ BuildRelease() {
   mv "$appName"-* build
 }
 
-BuildLoongOldWorld() {
-  echo building for linux-loong64-abi1.0
+BuildLoongGLIBC() {
+  local target_abi="$2"
+  local output_file="$1"
+  
+  if [ "$target_abi" = "abi1.0" ]; then
+    echo building for linux-loong64-abi1.0
+  else
+    echo building for linux-loong64-abi2.0
+    target_abi="abi2.0"  # Default to abi2.0 if not specified
+  fi
   
   # Force clean Go build cache to prevent ABI cross-contamination
   echo "Cleaning Go build cache to prevent ABI1.0/ABI2.0 cross-contamination..."
   go clean -cache
   go clean -modcache || true  # Don't fail if modcache clean fails
   
-  # Setup abi1.0 toolchain similar to cgo-action implementation
-  curl -fsSL --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" \
-    https://github.com/loong64/loong64-abi1.0-toolchains/releases/download/20250722/loongson-gnu-toolchain-8.3.novec-x86_64-loongarch64-linux-gnu-rc1.1.tar.xz \
-    -o gcc8-loong64-abi1.0.tar.xz
-  rm -rf gcc8-loong64-abi1.0
-  mkdir gcc8-loong64-abi1.0
-  tar -Jxf gcc8-loong64-abi1.0.tar.xz -C gcc8-loong64-abi1.0 --strip-components=1
-  rm gcc8-loong64-abi1.0.tar.xz
-  
-  export GOOS=linux
-  export GOARCH=loong64
-  export CC=$(pwd)/gcc8-loong64-abi1.0/bin/loongarch64-linux-gnu-gcc
-  export CXX=$(pwd)/gcc8-loong64-abi1.0/bin/loongarch64-linux-gnu-g++
-  export CGO_ENABLED=1
-  
-  # Force rebuild without cache to ensure ABI1.0 compatibility
-  go build -a -o "$1" -ldflags="$ldflags" -tags=jsoniter .
+  if [ "$target_abi" = "abi1.0" ]; then
+    # Setup abi1.0 toolchain similar to cgo-action implementation
+    curl -fsSL --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" \
+      https://github.com/loong64/loong64-abi1.0-toolchains/releases/download/20250722/loongson-gnu-toolchain-8.3.novec-x86_64-loongarch64-linux-gnu-rc1.1.tar.xz \
+      -o gcc8-loong64-abi1.0.tar.xz
+    rm -rf gcc8-loong64-abi1.0
+    mkdir gcc8-loong64-abi1.0
+    tar -Jxf gcc8-loong64-abi1.0.tar.xz -C gcc8-loong64-abi1.0 --strip-components=1
+    rm gcc8-loong64-abi1.0.tar.xz
+    
+    export GOOS=linux
+    export GOARCH=loong64
+    export CC=$(pwd)/gcc8-loong64-abi1.0/bin/loongarch64-linux-gnu-gcc
+    export CXX=$(pwd)/gcc8-loong64-abi1.0/bin/loongarch64-linux-gnu-g++
+    export CGO_ENABLED=1
+    
+    # Force rebuild without cache to ensure ABI1.0 compatibility
+    go build -a -o "$output_file" -ldflags="$ldflags" -tags=jsoniter .
+  else
+    # Setup abi2.0 toolchain for new world glibc build
+    curl -fsSL --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" \
+      https://github.com/loong64/cross-tools/releases/download/20250507/x86_64-cross-tools-loongarch64-unknown-linux-gnu-legacy.tar.xz \
+      -o gcc12-loong64-abi2.0.tar.xz
+    rm -rf gcc12-loong64-abi2.0
+    mkdir gcc12-loong64-abi2.0
+    tar -Jxf gcc12-loong64-abi2.0.tar.xz -C gcc12-loong64-abi2.0 --strip-components=1
+    rm gcc12-loong64-abi2.0.tar.xz
+    
+    export GOOS=linux
+    export GOARCH=loong64
+    export CC=$(pwd)/gcc12-loong64-abi2.0/bin/loongarch64-unknown-linux-gnu-gcc
+    export CXX=$(pwd)/gcc12-loong64-abi2.0/bin/loongarch64-unknown-linux-gnu-g++
+    export CGO_ENABLED=1
+    
+    # Force rebuild without cache to ensure ABI2.0 compatibility
+    go build -a -o "$output_file" -ldflags="$ldflags" -tags=jsoniter .
+  fi
 }
 
 BuildReleaseLinuxMusl() {
@@ -299,8 +327,10 @@ BuildReleaseLinuxMusl() {
     fi
   done
   
-  # Build Loongson old world (abi1.0) - cannot use musl, needs special toolchain
-  BuildLoongOldWorld ./build/$appName-linux-loong64-abi1.0
+  # Build LoongArch with glibc (both old world abi1.0 and new world abi2.0)
+  # Cannot use musl for these builds, need special glibc toolchains
+  BuildLoongGLIBC ./build/$appName-linux-loong64-abi1.0 abi1.0
+  BuildLoongGLIBC ./build/$appName-linux-loong64 abi2.0
 }
 
 BuildReleaseLinuxMuslArm() {
