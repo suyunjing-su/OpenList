@@ -24,9 +24,8 @@ func list(ctx context.Context, sid, path string, args model.SharingListArgs) (*m
 	}
 	path = utils.FixAndCleanPath(path)
 	if len(sharing.Files) == 1 || path != "/" {
-		virtualFiles := op.GetStorageVirtualFilesByPath(path)
 		storage, actualPath, err := op.GetSharingActualPath(sharing, path)
-		if err != nil && len(virtualFiles) == 0 {
+		if err != nil {
 			return nil, nil, errors.WithMessage(err, "failed list sharing")
 		}
 		var objs []model.Obj
@@ -35,10 +34,12 @@ func list(ctx context.Context, sid, path string, args model.SharingListArgs) (*m
 				Refresh: args.Refresh,
 				ReqPath: stdpath.Join(sid, path),
 			})
-			if err != nil && len(virtualFiles) == 0 {
+			if err != nil {
 				return nil, nil, errors.WithMessage(err, "failed list sharing")
 			}
 		}
+		// Only get virtual files for the actual path, not for fallback
+		virtualFiles := op.GetStorageVirtualFilesByPath(actualPath)
 		om := model.NewObjMerge()
 		objs = om.Merge(objs, virtualFiles...)
 		model.SortFiles(objs, sharing.OrderBy, sharing.OrderDirection)

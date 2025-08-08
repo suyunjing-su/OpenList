@@ -25,14 +25,7 @@ func get(ctx context.Context, sid, path string, args model.SharingListArgs) (*mo
 	}
 	path = utils.FixAndCleanPath(path)
 	if len(sharing.Files) == 1 || path != "/" {
-		if path != "/" {
-			virtualFiles := op.GetStorageVirtualFilesByPath(stdpath.Dir(path))
-			for _, f := range virtualFiles {
-				if f.GetName() == stdpath.Base(path) {
-					return sharing, f, nil
-				}
-			}
-		} else {
+		if path == "/" {
 			return sharing, &model.Object{
 				Name:     sid,
 				Size:     0,
@@ -43,6 +36,13 @@ func get(ctx context.Context, sid, path string, args model.SharingListArgs) (*mo
 		storage, actualPath, err := op.GetSharingActualPath(sharing, path)
 		if err != nil {
 			return nil, nil, errors.WithMessage(err, "failed get sharing file")
+		}
+		// Check virtual files only for the actual mapped path, not for arbitrary paths
+		virtualFiles := op.GetStorageVirtualFilesByPath(stdpath.Dir(actualPath))
+		for _, f := range virtualFiles {
+			if f.GetName() == stdpath.Base(actualPath) {
+				return sharing, f, nil
+			}
 		}
 		obj, err := op.Get(ctx, storage, actualPath)
 		return sharing, obj, err
