@@ -302,11 +302,26 @@ func Preup(c context.Context, s driver.Driver, actualPath string, req *reqres.Pr
 type sliceup struct {
 	*tables.SliceUpload
 	tmpFile *os.File
-	*sync.Mutex
+	sync.Mutex
 }
 
 // 分片上传缓存
 var sliceupMap = sync.Map{}
+
+type sliceWriter struct {
+	file   *os.File
+	offset int64
+}
+
+// Write implements io.Writer interface
+// 虽然每个分片都定义了一个sliceWriter
+// 但是Write方法会在同一个分片复制过程中多次调用，
+// 所以要更新自身的offset
+func (sw *sliceWriter) Write(p []byte) (int, error) {
+	n, err := sw.file.WriteAt(p, sw.offset)
+	sw.offset += int64(n)
+	return n, err
+}
 
 // UploadSlice 上传切片，第一个分片必须先上传
 func UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadSliceReq, file multipart.File) error {
@@ -335,12 +350,14 @@ func UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadS
 		}
 	}()
 
+	// 检查分片是否已上传过
+	if tables.IsSliceUploaded(msu.SliceUploadStatus, int(req.SliceNum)) {
+		log.Warnf("slice already uploaded,req:%+v", req)
+		return nil
+	}
+
 	if req.SliceHash != "" {
 		sliceHash := []string{} // 分片hash
-		if tables.IsSliceUploaded(msu.SliceUploadStatus, int(req.SliceNum)) {
-			log.Warnf("slice already uploaded,req:%+v", req)
-			return nil
-		}
 
 		//验证分片hash值
 		if req.SliceNum == 0 { //第一个分片，slicehash是所有的分片hash
@@ -376,15 +393,18 @@ func UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadS
 		}
 
 	default: //其他网盘先缓存到本地
+		msu.Lock()
 		if msu.TmpFile == "" {
 			tf, err := os.CreateTemp(conf.Conf.TempDir, "file-*")
 			if err != nil {
+				msu.Unlock()
 				log.Error("CreateTemp error", req, err)
 				return err
 			}
 			abspath := tf.Name() //这里返回的是绝对路径
 			err = os.Truncate(abspath, int64(msu.Size))
 			if err != nil {
+				msu.Unlock()
 				log.Error("Truncate error", req, err)
 				return err
 			}
@@ -394,19 +414,22 @@ func UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadS
 		if msu.tmpFile == nil {
 			msu.tmpFile, err = os.OpenFile(msu.TmpFile, os.O_RDWR, 0644)
 			if err != nil {
+				msu.Unlock()
 				log.Error("OpenFile error", req, msu.TmpFile, err)
 				return err
 			}
 		}
+		msu.Unlock()
 
-		content, err := io.ReadAll(file) //这里一次性读取全部，如果并发较多，可能会占用较多内存
-		if err != nil {
-			log.Error("ReadAll error", req, err)
-			return err
+		// 流式复制，减少内存占用
+		sw := &sliceWriter{
+			file:   msu.tmpFile,
+			offset: int64(req.SliceNum) * int64(msu.SliceSize),
 		}
-		_, err = msu.tmpFile.WriteAt(content, int64(req.SliceNum)*int64(msu.SliceSize))
+		_, err := io.Copy(sw, file)
+
 		if err != nil {
-			log.Error("WriteAt error", req, err)
+			log.Error("Copy error", req, err)
 			return err
 		}
 	}
@@ -524,6 +547,7 @@ func SliceUpComplete(ctx context.Context, storage driver.Driver, uploadID uint) 
 			log.Error("Put error", msu.SliceUpload, err)
 			return nil, err
 		}
+		os.Remove(msu.TmpFile)
 		return &reqres.UploadSliceCompleteResp{
 			Complete: 1,
 			UploadID: msu.ID,
