@@ -347,7 +347,7 @@ func (d *Chunk) Remove(ctx context.Context, obj model.Obj) error {
 	}
 	for _, o := range objs {
 		suffix := strings.TrimPrefix(o.GetName(), base)
-		if suffix != obj.GetName() && strings.HasPrefix(suffix, ".openlist_chunk_") {
+		if suffix != o.GetName() && strings.HasPrefix(suffix, ".openlist_chunk_") {
 			err = errors.Join(err, fs.Remove(ctx, path+suffix))
 		}
 	}
@@ -362,6 +362,10 @@ func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStream
 	dst := stdpath.Join(d.RemotePath, dstDir.GetPath())
 	fullPartCount := int(file.GetSize() / d.PartSize)
 	tailSize := file.GetSize() % d.PartSize
+	if tailSize == 0 && fullPartCount > 0 {
+		fullPartCount--
+		tailSize = d.PartSize
+	}
 	partIndex := 0
 	var err error
 	for partIndex < fullPartCount {
