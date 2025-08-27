@@ -17,13 +17,11 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
-	"github.com/OpenListTeam/OpenList/v4/server/common"
 )
 
 type Chunk struct {
 	model.Storage
 	Addition
-	remoteStorage   driver.Driver
 	partNameMatchRe *regexp.Regexp
 }
 
@@ -138,12 +136,16 @@ func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 }
 
 func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
-	path := stdpath.Join(d.RemotePath, file.GetPath())
+	storage, reqActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
+	if err != nil {
+		return nil, err
+	}
+	path := stdpath.Join(reqActualPath, file.GetPath())
 	links := make([]*model.Link, 0)
 	rrfs := make([]model.RangeReaderIF, 0)
 	totalLength := int64(0)
 	for {
-		l, o, err := link(ctx, d.getPartName(path, len(links)), args)
+		l, o, err := op.Link(ctx, storage, d.getPartName(path, len(links)), args)
 		if errors.Is(err, errs.ObjectNotFound) {
 			break
 		}
@@ -169,7 +171,7 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 		totalLength += l.ContentLength
 	}
 	mergedRrf := func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
-		if httpRange.Length == -1 {
+		if httpRange.Length < 0 || httpRange.Start+httpRange.Length > totalLength {
 			httpRange.Length = totalLength - httpRange.Start
 		}
 		firstPartIdx := 0
@@ -229,12 +231,9 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 		}
 		rs = append(rs, lastRc)
 		cs = append(cs, lastRc)
-		return &struct {
-			io.Reader
-			utils.Closers
-		}{
-			Reader:  io.MultiReader(rs...),
-			Closers: cs,
+		return utils.ReadCloser{
+			Reader: io.MultiReader(rs...),
+			Closer: &cs,
 		}, nil
 	}
 	linkClosers := make([]io.Closer, 0, len(links))
@@ -245,24 +244,6 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 		RangeReader: stream.RangeReaderFunc(mergedRrf),
 		SyncClosers: utils.NewSyncClosers(linkClosers...),
 	}, nil
-}
-
-func link(ctx context.Context, reqPath string, args model.LinkArgs) (*model.Link, model.Obj, error) {
-	storage, reqActualPath, err := op.GetStorageAndActualPath(reqPath)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !args.Redirect {
-		return op.Link(ctx, storage, reqActualPath, args)
-	}
-	obj, err := fs.Get(ctx, reqPath, &fs.GetArgs{NoLog: true})
-	if err != nil {
-		return nil, nil, err
-	}
-	if common.ShouldProxy(storage, stdpath.Base(reqPath)) {
-		return nil, obj, nil
-	}
-	return op.Link(ctx, storage, reqActualPath, args)
 }
 
 func (d *Chunk) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {
@@ -355,11 +336,15 @@ func (d *Chunk) Remove(ctx context.Context, obj model.Obj) error {
 }
 
 func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) error {
+	storage, reqActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
+	if err != nil {
+		return err
+	}
 	upReader := &driver.ReaderUpdatingProgress{
 		Reader:         file,
 		UpdateProgress: up,
 	}
-	dst := stdpath.Join(d.RemotePath, dstDir.GetPath())
+	dst := stdpath.Join(reqActualPath, dstDir.GetPath())
 	fullPartCount := int(file.GetSize() / d.PartSize)
 	tailSize := file.GetSize() % d.PartSize
 	if tailSize == 0 && fullPartCount > 0 {
@@ -367,9 +352,8 @@ func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStream
 		tailSize = d.PartSize
 	}
 	partIndex := 0
-	var err error
 	for partIndex < fullPartCount {
-		err = errors.Join(err, fs.PutDirectly(ctx, dst, &stream.FileStream{
+		err = errors.Join(err, op.Put(ctx, storage, dst, &stream.FileStream{
 			Obj: &model.Object{
 				Name:     d.getPartName(file.GetName(), partIndex),
 				Size:     d.PartSize,
@@ -377,10 +361,10 @@ func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStream
 			},
 			Mimetype: file.GetMimetype(),
 			Reader:   io.LimitReader(upReader, d.PartSize),
-		}, true))
+		}, nil, true))
 		partIndex++
 	}
-	return errors.Join(err, fs.PutDirectly(ctx, dst, &stream.FileStream{
+	return errors.Join(err, op.Put(ctx, storage, dst, &stream.FileStream{
 		Obj: &model.Object{
 			Name:     d.getPartName(file.GetName(), fullPartCount),
 			Size:     tailSize,
@@ -388,7 +372,7 @@ func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStream
 		},
 		Mimetype: file.GetMimetype(),
 		Reader:   upReader,
-	}))
+	}, nil))
 }
 
 func (d *Chunk) getPartName(name string, part int) string {
