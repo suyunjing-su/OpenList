@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	stdpath "path"
 	"regexp"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/fs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	"github.com/OpenListTeam/OpenList/v4/internal/net"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
@@ -140,6 +142,7 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 	if err != nil {
 		return nil, err
 	}
+	args.Redirect = false
 	path := stdpath.Join(reqActualPath, file.GetPath())
 	links := make([]*model.Link, 0)
 	rrfs := make([]model.RangeReaderIF, 0)
@@ -171,70 +174,56 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 		totalLength += l.ContentLength
 	}
 	mergedRrf := func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
-		if httpRange.Length < 0 || httpRange.Start+httpRange.Length > totalLength {
-			httpRange.Length = totalLength - httpRange.Start
+		start := httpRange.Start
+		length := httpRange.Length
+		if length < 0 || start+length > totalLength {
+			length = totalLength - start
 		}
-		firstPartIdx := 0
-		firstPartStart := httpRange.Start
-		for firstPartIdx < len(links) && firstPartStart > links[firstPartIdx].ContentLength {
-			firstPartStart -= links[firstPartIdx].ContentLength
-			firstPartIdx++
-		}
-		if firstPartIdx == len(links) {
-			return nil, io.EOF
-		}
-		if firstPartStart+httpRange.Length <= links[firstPartIdx].ContentLength {
-			return rrfs[firstPartIdx].RangeRead(ctx, http_range.Range{
-				Start:  firstPartStart,
-				Length: httpRange.Length,
-			})
-		}
-
-		lastPartIdx := firstPartIdx
-		tailLength := firstPartStart + httpRange.Length
-		for lastPartIdx < len(links) && tailLength > links[lastPartIdx].ContentLength {
-			tailLength -= links[lastPartIdx].ContentLength
-			lastPartIdx++
-		}
-		if lastPartIdx == len(links) || tailLength == 0 {
-			lastPartIdx--
-			tailLength = links[lastPartIdx].ContentLength
-		}
-
-		rs := make([]io.Reader, 0, lastPartIdx-firstPartIdx+1)
-		cs := make(utils.Closers, 0, lastPartIdx-firstPartIdx+1)
-		firstRc, err := rrfs[firstPartIdx].RangeRead(ctx, http_range.Range{
-			Start:  firstPartStart,
-			Length: links[firstPartIdx].ContentLength - firstPartStart,
-		})
-		if err != nil {
-			return nil, err
-		}
-		rs = append(rs, firstRc)
-		cs = append(cs, firstRc)
-		partIdx := firstPartIdx + 1
-		for partIdx < lastPartIdx {
-			rc, err := rrfs[partIdx].RangeRead(ctx, http_range.Range{Length: -1})
-			if err != nil {
-				return nil, err
+		rs := make([]io.Reader, 0)
+		cs := make(utils.Closers, 0)
+		var (
+			rc       io.ReadCloser
+			err      error
+			readFrom bool
+		)
+		for idx, l := range links {
+			if readFrom {
+				newLength := length - l.ContentLength
+				if newLength >= 0 {
+					length = newLength
+					rc, err = rrfs[idx].RangeRead(ctx, http_range.Range{Length: -1})
+				} else {
+					rc, err = rrfs[idx].RangeRead(ctx, http_range.Range{Length: length})
+				}
+				if err != nil {
+					_ = cs.Close()
+					return nil, err
+				}
+				rs = append(rs, rc)
+				cs = append(cs, rc)
+				if newLength <= 0 {
+					return utils.ReadCloser{
+						Reader: io.MultiReader(rs...),
+						Closer: &cs,
+					}, nil
+				}
+			} else if newStart := start - l.ContentLength; newStart >= 0 {
+				start = newStart
+			} else {
+				rc, err = rrfs[idx].RangeRead(ctx, http_range.Range{Start: start, Length: -1})
+				if err != nil {
+					return nil, err
+				}
+				length -= l.ContentLength - start
+				if length <= 0 {
+					return rc, nil
+				}
+				rs = append(rs, rc)
+				cs = append(cs, rc)
+				readFrom = true
 			}
-			rs = append(rs, rc)
-			cs = append(cs, rc)
-			partIdx++
 		}
-		lastRc, err := rrfs[lastPartIdx].RangeRead(ctx, http_range.Range{
-			Start:  0,
-			Length: tailLength,
-		})
-		if err != nil {
-			return nil, err
-		}
-		rs = append(rs, lastRc)
-		cs = append(cs, lastRc)
-		return utils.ReadCloser{
-			Reader: io.MultiReader(rs...),
-			Closer: &cs,
-		}, nil
+		return nil, fmt.Errorf("invalid range: start=%d,length=%d,totalLength=%d, status: %w", httpRange.Start, httpRange.Length, totalLength, net.ErrorHttpStatusCode(http.StatusRequestedRangeNotSatisfiable))
 	}
 	linkClosers := make([]io.Closer, 0, len(links))
 	for _, l := range links {
