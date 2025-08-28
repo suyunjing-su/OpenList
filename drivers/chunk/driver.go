@@ -223,7 +223,7 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 				readFrom = true
 			}
 		}
-		return nil, fmt.Errorf("invalid range: start=%d,length=%d,totalLength=%d, status: %w", httpRange.Start, httpRange.Length, totalLength, net.ErrorHttpStatusCode(http.StatusRequestedRangeNotSatisfiable))
+		return nil, fmt.Errorf("invalid range: start=%d,length=%d,totalLength=%d, status: %w", httpRange.Start, httpRange.Length, totalLength, net.HttpStatusCodeError(http.StatusRequestedRangeNotSatisfiable))
 	}
 	linkClosers := make([]io.Closer, 0, len(links))
 	for _, l := range links {
