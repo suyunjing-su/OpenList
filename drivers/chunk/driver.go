@@ -149,14 +149,16 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 	totalLength := int64(0)
 	for {
 		l, o, err := op.Link(ctx, storage, d.getPartName(path, len(links)), args)
-		if errors.Is(err, errs.ObjectNotFound) {
-			break
-		}
 		if err != nil {
-			for _, l1 := range links {
-				_ = l1.Close()
+			if len(links) > 0 {
+				if errors.Is(err, errs.ObjectNotFound) {
+					break
+				}
+				for _, l1 := range links {
+					_ = l1.Close()
+				}
 			}
-			return nil, fmt.Errorf("failed get Part %d link: %+v", len(links), err)
+			return nil, fmt.Errorf("failed get Part %d link: %w", len(links), err)
 		}
 		if l.ContentLength <= 0 {
 			l.ContentLength = o.GetSize()
@@ -167,7 +169,7 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 				_ = l1.Close()
 			}
 			_ = l.Close()
-			return nil, fmt.Errorf("failed get Part %d range reader: %+v", len(links), err)
+			return nil, fmt.Errorf("failed get Part %d range reader: %w", len(links), err)
 		}
 		links = append(links, l)
 		rrfs = append(rrfs, rrf)
