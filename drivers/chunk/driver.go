@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	stdpath "path"
 	"regexp"
 	"strings"
@@ -14,7 +13,6 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/fs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
-	"github.com/OpenListTeam/OpenList/v4/internal/net"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
@@ -225,7 +223,7 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 				readFrom = true
 			}
 		}
-		return nil, fmt.Errorf("invalid range: start=%d,length=%d,totalLength=%d, status: %w", httpRange.Start, httpRange.Length, totalLength, net.HttpStatusCodeError(http.StatusRequestedRangeNotSatisfiable))
+		return nil, fmt.Errorf("invalid range: start=%d,length=%d,totalLength=%d", httpRange.Start, httpRange.Length, totalLength)
 	}
 	linkClosers := make([]io.Closer, 0, len(links))
 	for _, l := range links {
