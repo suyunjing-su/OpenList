@@ -192,6 +192,10 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 	chunkFile := file.(*chunkObject)
 	args.Redirect = false
 	path := stdpath.Join(reqActualPath, chunkFile.GetPath())
+	if len(chunkFile.chunkSizes) <= 1 {
+		l, _, err := op.Link(ctx, storage, path, args)
+		return l, err
+	}
 	fileSize := chunkFile.GetSize()
 	mergedRrf := func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
 		start := httpRange.Start
