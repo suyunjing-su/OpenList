@@ -7,6 +7,7 @@ import (
 	"io"
 	stdpath "path"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
@@ -62,6 +63,8 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 	partPrefix := base + ".openlist_chunk_"
 	var first model.Obj
 	var totalSize int64 = 0
+	var idxMask int64 = 0
+	chunkSizes := make([]int64, 1)
 	for _, obj := range objs {
 		if obj.GetName() == base {
 			first = obj
@@ -70,21 +73,44 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 				break
 			} else {
 				totalSize += obj.GetSize()
+				chunkSizes[0] = obj.GetSize()
+				idxMask |= 1
 			}
-		} else if strings.HasPrefix(obj.GetName(), partPrefix) {
+		} else if suffix, ok := strings.CutPrefix(obj.GetName(), partPrefix); ok {
+			idx, err := strconv.Atoi(strings.TrimSuffix(suffix, d.CustomExt))
+			if err != nil {
+				return nil, fmt.Errorf("invalid chunk part name: %s", obj.GetName())
+			}
 			totalSize += obj.GetSize()
+			if len(chunkSizes) > idx {
+				chunkSizes[idx] = obj.GetSize()
+			} else if len(chunkSizes) == idx {
+				chunkSizes = append(chunkSizes, obj.GetSize())
+			} else {
+				newChunkSizes := make([]int64, idx+1)
+				copy(newChunkSizes, chunkSizes)
+				chunkSizes = newChunkSizes
+				chunkSizes[idx] = obj.GetSize()
+			}
+			idxMask |= 1 << idx
 		}
 	}
 	if first == nil {
 		return nil, errs.ObjectNotFound
 	}
-	return &model.Object{
-		Path:     path,
-		Name:     base,
-		Size:     totalSize,
-		Modified: first.ModTime(),
-		Ctime:    first.CreateTime(),
-		IsFolder: first.IsDir(),
+	if (idxMask+1)&idxMask != 0 {
+		return nil, fmt.Errorf("some chunk parts are missing for file: %s", path)
+	}
+	return &chunkObject{
+		Object: model.Object{
+			Path:     path,
+			Name:     base,
+			Size:     totalSize,
+			Modified: first.ModTime(),
+			Ctime:    first.CreateTime(),
+			IsFolder: first.IsDir(),
+		},
+		chunkSizes: chunkSizes,
 	}, nil
 }
 
@@ -95,6 +121,8 @@ func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 	}
 	ret := make([]model.Obj, 0)
 	sizeMap := make(map[string]int64)
+	chunkSizeMap := make(map[string][]int64)
+	chunkIdxMask := make(map[string]int64)
 	for _, obj := range objs {
 		if obj.IsDir() {
 			ret = append(ret, &model.Object{
@@ -108,28 +136,49 @@ func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 		}
 		var name string
 		matches := d.partNameMatchRe.FindStringSubmatch(obj.GetName())
+		idx := 0
 		if len(matches) < 3 {
-			ret = append(ret, &model.Object{
-				Name:     obj.GetName(),
-				Size:     0,
-				Modified: obj.ModTime(),
-				Ctime:    obj.CreateTime(),
-				IsFolder: false,
+			ret = append(ret, &chunkObject{
+				Object: model.Object{
+					Name:     obj.GetName(),
+					Size:     0,
+					Modified: obj.ModTime(),
+					Ctime:    obj.CreateTime(),
+					IsFolder: false,
+				},
 			})
 			name = obj.GetName()
 		} else {
 			name = matches[1]
+			idx, _ = strconv.Atoi(matches[2])
 		}
-		_, ok := sizeMap[name]
-		if !ok {
-			sizeMap[name] = obj.GetSize()
+		sizeMap[name] += obj.GetSize()
+		// Mark this chunk index as present
+		chunkIdxMask[name] |= 1 << idx
+		// Collect chunk sizes
+		chunkSizes := chunkSizeMap[name]
+		if len(chunkSizes) > idx {
+			chunkSizes[idx] = obj.GetSize()
+		} else if len(chunkSizes) == idx {
+			chunkSizes = append(chunkSizes, obj.GetSize())
 		} else {
-			sizeMap[name] += obj.GetSize()
+			newChunkSizes := make([]int64, idx+1)
+			copy(newChunkSizes, chunkSizes)
+			chunkSizes = newChunkSizes
+			chunkSizes[idx] = obj.GetSize()
 		}
+		chunkSizeMap[name] = chunkSizes
 	}
 	for _, obj := range ret {
 		if !obj.IsDir() {
-			obj.(*model.Object).Size = sizeMap[obj.GetName()]
+			// Check if all chunk parts are present
+			idxMask := chunkIdxMask[obj.GetName()]
+			if idxMask > 0 && (idxMask+1)&idxMask != 0 {
+				return nil, fmt.Errorf("some chunk parts are missing for file: %s", obj.GetName())
+			}
+			cObj := obj.(*chunkObject)
+			cObj.Size = sizeMap[cObj.Name]
+			cObj.chunkSizes = chunkSizeMap[cObj.Name]
 		}
 	}
 	return ret, nil
@@ -140,98 +189,111 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 	if err != nil {
 		return nil, err
 	}
+	chunkFile := file.(*chunkObject)
 	args.Redirect = false
-	path := stdpath.Join(reqActualPath, file.GetPath())
-	links := make([]*model.Link, 0)
-	rrfs := make([]model.RangeReaderIF, 0)
-	totalLength := int64(0)
-	for {
-		l, o, err := op.Link(ctx, storage, d.getPartName(path, len(links)), args)
-		if err != nil {
-			if len(links) > 0 {
-				if errors.Is(err, errs.ObjectNotFound) {
-					break
-				}
-				for _, l1 := range links {
-					_ = l1.Close()
-				}
-			}
-			return nil, fmt.Errorf("failed get Part %d link: %w", len(links), err)
-		}
-		if l.ContentLength <= 0 {
-			l.ContentLength = o.GetSize()
-		}
-		rrf, err := stream.GetRangeReaderFromLink(l.ContentLength, l)
-		if err != nil {
-			for _, l1 := range links {
-				_ = l1.Close()
-			}
-			_ = l.Close()
-			return nil, fmt.Errorf("failed get Part %d range reader: %w", len(links), err)
-		}
-		links = append(links, l)
-		rrfs = append(rrfs, rrf)
-		totalLength += l.ContentLength
-	}
+	path := stdpath.Join(reqActualPath, chunkFile.GetPath())
+	fileSize := chunkFile.GetSize()
 	mergedRrf := func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
 		start := httpRange.Start
 		length := httpRange.Length
-		if length < 0 || start+length > totalLength {
-			length = totalLength - start
+		if length < 0 || start+length > fileSize {
+			length = fileSize - start
+		}
+		if length == 0 {
+			return io.NopCloser(strings.NewReader("")), nil
 		}
 		rs := make([]io.Reader, 0)
 		cs := make(utils.Closers, 0)
 		var (
 			rc       io.ReadCloser
-			err      error
 			readFrom bool
 		)
-		for idx, l := range links {
+		for idx, chunkSize := range chunkFile.chunkSizes {
 			if readFrom {
-				newLength := length - l.ContentLength
+				l, o, err := op.Link(ctx, storage, d.getPartName(path, idx), args)
+				if err != nil {
+					_ = cs.Close()
+					return nil, err
+				}
+				chunkSize2 := l.ContentLength
+				if chunkSize2 <= 0 {
+					chunkSize2 = o.GetSize()
+				}
+				if chunkSize2 != chunkSize {
+					_ = cs.Close()
+					_ = l.Close()
+					return nil, fmt.Errorf("chunk part size changed, please retry: %s", o.GetPath())
+				}
+				rrf, err := stream.GetRangeReaderFromLink(chunkSize2, l)
+				if err != nil {
+					_ = cs.Close()
+					_ = l.Close()
+					return nil, err
+				}
+				newLength := length - chunkSize2
 				if newLength >= 0 {
 					length = newLength
-					rc, err = rrfs[idx].RangeRead(ctx, http_range.Range{Length: -1})
+					rc, err = rrf.RangeRead(ctx, http_range.Range{Length: -1})
 				} else {
-					rc, err = rrfs[idx].RangeRead(ctx, http_range.Range{Length: length})
+					rc, err = rrf.RangeRead(ctx, http_range.Range{Length: length})
 				}
 				if err != nil {
 					_ = cs.Close()
 					return nil, err
 				}
 				rs = append(rs, rc)
-				cs = append(cs, rc)
+				cs = append(cs, rc, l)
 				if newLength <= 0 {
 					return utils.ReadCloser{
 						Reader: io.MultiReader(rs...),
 						Closer: &cs,
 					}, nil
 				}
-			} else if newStart := start - l.ContentLength; newStart >= 0 {
+			} else if newStart := start - chunkSize; newStart >= 0 {
 				start = newStart
 			} else {
-				rc, err = rrfs[idx].RangeRead(ctx, http_range.Range{Start: start, Length: -1})
+				l, o, err := op.Link(ctx, storage, d.getPartName(path, idx), args)
+				if err != nil {
+					_ = cs.Close()
+					_ = l.Close()
+					return nil, err
+				}
+				chunkSize2 := l.ContentLength
+				if chunkSize2 <= 0 {
+					chunkSize2 = o.GetSize()
+				}
+				if chunkSize2 != chunkSize {
+					_ = cs.Close()
+					_ = l.Close()
+					return nil, fmt.Errorf("chunk part size not match, need refresh cache: %s", o.GetPath())
+				}
+				rrf, err := stream.GetRangeReaderFromLink(chunkSize2, l)
+				if err != nil {
+					_ = cs.Close()
+					_ = l.Close()
+					return nil, err
+				}
+				rc, err = rrf.RangeRead(ctx, http_range.Range{Start: start, Length: -1})
 				if err != nil {
 					return nil, err
 				}
-				length -= l.ContentLength - start
+				length -= chunkSize2 - start
+				cs = append(cs, rc, l)
 				if length <= 0 {
-					return rc, nil
+					return utils.ReadCloser{
+						Reader: rc,
+						Closer: &cs,
+					}, nil
 				}
 				rs = append(rs, rc)
-				cs = append(cs, rc)
+				cs = append(cs, rc, l)
 				readFrom = true
 			}
 		}
-		return nil, fmt.Errorf("invalid range: start=%d,length=%d,totalLength=%d", httpRange.Start, httpRange.Length, totalLength)
-	}
-	linkClosers := make([]io.Closer, 0, len(links))
-	for _, l := range links {
-		linkClosers = append(linkClosers, l)
+		return nil, fmt.Errorf("invalid range: start=%d,length=%d,fileSize=%d", httpRange.Start, httpRange.Length, fileSize)
 	}
 	return &model.Link{
 		RangeReader: stream.RangeReaderFunc(mergedRrf),
-		SyncClosers: utils.NewSyncClosers(linkClosers...),
 	}, nil
 }
 
