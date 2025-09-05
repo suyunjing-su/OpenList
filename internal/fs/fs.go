@@ -512,18 +512,6 @@ func SliceUpComplete(ctx context.Context, storage driver.Driver, uploadID uint) 
 			Complete: 1,
 			UploadID: msu.ID,
 		}
-		// 清理缓存及临时文件
-		if msu.tmpFile != nil {
-			if closeErr := msu.tmpFile.Close(); closeErr != nil {
-				log.Errorf("Failed to close tmp file: %v", closeErr)
-			}
-		}
-		if msu.TmpFile != "" {
-			if removeErr := os.Remove(msu.TmpFile); removeErr != nil && !os.IsNotExist(removeErr) {
-				log.Errorf("Failed to remove tmp file %s: %v", msu.TmpFile, removeErr)
-			}
-		}
-
 		return rsp, nil
 
 	default:
@@ -567,11 +555,6 @@ func SliceUpComplete(ctx context.Context, storage driver.Driver, uploadID uint) 
 		if err != nil {
 			log.Error("Put error", msu.SliceUpload, err)
 			return nil, err
-		}
-		if msu.TmpFile != "" {
-			if removeErr := os.Remove(msu.TmpFile); removeErr != nil && !os.IsNotExist(removeErr) {
-				log.Errorf("Failed to remove tmp file %s: %v", msu.TmpFile, removeErr)
-			}
 		}
 		return &reqres.UploadSliceCompleteResp{
 			Complete: 1,
