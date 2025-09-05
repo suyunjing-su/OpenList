@@ -396,10 +396,18 @@ func (d *BaiduNetdisk) SliceUpload(ctx context.Context, req *tables.SliceUpload,
 			SliceMd5:   req.HashMd5256KB,
 		})
 		if err != nil {
-			return err
+			return fmt.Errorf("precreate failed: %w", err)
+		}
+		if precreateResp == nil {
+			return fmt.Errorf("precreate returned nil response")
 		}
 		req.PreupID = precreateResp.Uploadid
 	}
+	
+	if req.PreupID == "" {
+		return fmt.Errorf("preupload ID is empty for slice %d", sliceno)
+	}
+	
 	err := d.uploadSlice(ctx, map[string]string{
 		"method":       "upload",
 		"access_token": d.AccessToken,
@@ -408,8 +416,11 @@ func (d *BaiduNetdisk) SliceUpload(ctx context.Context, req *tables.SliceUpload,
 		"uploadid":     req.PreupID,
 		"partseq":      strconv.Itoa(int(sliceno)),
 	}, req.Name, fd)
-	return err
-
+	
+	if err != nil {
+		return fmt.Errorf("upload slice %d failed: %w", sliceno, err)
+	}
+	return nil
 }
 
 // Preup 预上传(自定以接口，为了适配自定义的分片上传)
@@ -424,15 +435,28 @@ func (d *BaiduNetdisk) UploadSliceComplete(ctx context.Context, su *tables.Slice
 	fp := filepath.Join(su.DstPath, su.Name)
 	rsp := &SliceUpCompleteResp{}
 	t := time.Now().Unix()
-	sh, err := json.Marshal(strings.Split(su.SliceHash, ","))
-	if err != nil {
-		return err
+	
+	sliceHashList := strings.Split(su.SliceHash, ",")
+	if len(sliceHashList) == 0 {
+		return fmt.Errorf("slice hash list is empty")
 	}
+	
+	sh, err := json.Marshal(sliceHashList)
+	if err != nil {
+		return fmt.Errorf("failed to marshal slice hash: %w", err)
+	}
+	
 	b, err := d.create(fp, int64(su.Size), 0, su.PreupID, string(sh), rsp, t, t)
 	if err != nil {
-		log.Error(err, rsp, string(b))
+		log.Errorf("create file failed: %v, response: %v, body: %s", err, rsp, string(b))
+		return fmt.Errorf("create file failed: %w", err)
 	}
-	return err
+	
+	if rsp.Errno != 0 {
+		return fmt.Errorf("baidu response error: errno=%d", rsp.Errno)
+	}
+	
+	return nil
 }
 
 var _ driver.Driver = (*BaiduNetdisk)(nil)

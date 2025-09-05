@@ -25,6 +25,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/task"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/pkg/errors"
+	"github.com/google/uuid"
 )
 
 // the param named path of functions in this package is a mount path
@@ -206,10 +207,12 @@ func PutURL(ctx context.Context, path, dstName, urlStr string) error {
 
 // Preup 预上传
 func Preup(c context.Context, s driver.Driver, actualPath string, req *reqres.PreupReq) (*reqres.PreupResp, error) {
+	// 检查是否存在未完成的上传任务（用于断点续传）
 	wh := map[string]any{}
 	wh["dst_path"] = req.Path
 	wh["name"] = req.Name
 	wh["size"] = req.Size
+	wh["status"] = tables.SliceUploadStatusUploading // 只查找正在进行中的任务
 	if req.Hash.Md5 != "" {
 		wh["hash_md5"] = req.Hash.Md5
 	}
@@ -226,14 +229,15 @@ func Preup(c context.Context, s driver.Driver, actualPath string, req *reqres.Pr
 		return nil, errors.WithStack(err)
 	}
 
-	if su.ID != 0 { // 已存在
+	if su.ID != 0 { // 找到未完成的上传任务，支持断点续传
 		return &reqres.PreupResp{
-			UploadID:          su.ID,
+			TaskID:            su.TaskID,
 			SliceSize:         su.SliceSize,
 			SliceCnt:          su.SliceCnt,
 			SliceUploadStatus: su.SliceUploadStatus,
 		}, nil
 	}
+	
 	srcobj, err := op.Get(c, s, actualPath)
 	if err != nil {
 		log.Error(err)
@@ -241,8 +245,12 @@ func Preup(c context.Context, s driver.Driver, actualPath string, req *reqres.Pr
 	}
 	user, _ := c.Value(conf.UserKey).(*model.User)
 
-	//不存在
+	// 生成唯一的TaskID
+	taskID := uuid.New().String()
+	
+	//创建新的上传任务
 	createsu := &tables.SliceUpload{
+		TaskID:       taskID,
 		DstPath:      req.Path,
 		DstID:        srcobj.GetID(),
 		Size:         req.Size,
@@ -270,7 +278,7 @@ func Preup(c context.Context, s driver.Driver, actualPath string, req *reqres.Pr
 				Reuse:     true,
 				SliceCnt:  0,
 				SliceSize: res.SliceSize,
-				UploadID:  0,
+				TaskID:    taskID,
 			}, nil
 
 		}
@@ -283,6 +291,7 @@ func Preup(c context.Context, s driver.Driver, actualPath string, req *reqres.Pr
 	}
 	createsu.SliceCnt = uint((req.Size + createsu.SliceSize - 1) / createsu.SliceSize)
 	createsu.SliceUploadStatus = make([]byte, (createsu.SliceCnt+7)/8)
+	createsu.Status = tables.SliceUploadStatusWaiting // 设置初始状态
 
 	err = db.CreateSliceUpload(createsu)
 	if err != nil {
@@ -294,7 +303,7 @@ func Preup(c context.Context, s driver.Driver, actualPath string, req *reqres.Pr
 		SliceUploadStatus: createsu.SliceUploadStatus,
 		SliceSize:         createsu.SliceSize,
 		SliceCnt:          createsu.SliceCnt,
-		UploadID:          createsu.ID,
+		TaskID:            createsu.TaskID,
 	}, nil
 
 }
@@ -305,7 +314,60 @@ type sliceup struct {
 	sync.Mutex
 }
 
-// 分片上传缓存
+// ensureTmpFile 确保临时文件存在且正确初始化，线程安全
+func (su *sliceup) ensureTmpFile() error {
+	su.Lock()
+	defer su.Unlock()
+	
+	if su.TmpFile == "" {
+		tf, err := os.CreateTemp(conf.Conf.TempDir, "file-*")
+		if err != nil {
+			return fmt.Errorf("CreateTemp error: %w", err)
+		}
+		
+		abspath := tf.Name() //这里返回的是绝对路径
+		if err = os.Truncate(abspath, int64(su.Size)); err != nil {
+			tf.Close() // 确保文件被关闭
+			os.Remove(abspath) // 清理文件
+			return fmt.Errorf("Truncate error: %w", err)
+		}
+		
+		su.TmpFile = abspath
+		su.tmpFile = tf
+		return nil
+	}
+	
+	if su.tmpFile == nil {
+		var err error
+		su.tmpFile, err = os.OpenFile(su.TmpFile, os.O_RDWR, 0644)
+		if err != nil {
+			return fmt.Errorf("OpenFile error: %w", err)
+		}
+	}
+	return nil
+}
+
+// cleanup 清理资源，线程安全
+func (su *sliceup) cleanup() {
+	su.Lock()
+	defer su.Unlock()
+	
+	if su.tmpFile != nil {
+		if closeErr := su.tmpFile.Close(); closeErr != nil {
+			log.Errorf("Failed to close tmp file: %v", closeErr)
+		}
+		su.tmpFile = nil
+	}
+	
+	if su.TmpFile != "" {
+		if removeErr := os.Remove(su.TmpFile); removeErr != nil && !os.IsNotExist(removeErr) {
+			log.Errorf("Failed to remove tmp file %s: %v", su.TmpFile, removeErr)
+		}
+		su.TmpFile = ""
+	}
+}
+
+// 分片上传缓存，使用TaskID作为key
 var sliceupMap = sync.Map{}
 
 type sliceWriter struct {
@@ -328,65 +390,88 @@ func UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadS
 	var msu *sliceup
 	var err error
 
-	// 使用 LoadOrStore 避免并发竞态条件
-	sa, loaded := sliceupMap.LoadOrStore(req.UploadID, nil)
+	// 使用 LoadOrStore 避免并发竞态条件，使用TaskID作为key
+	sa, loaded := sliceupMap.LoadOrStore(req.TaskID, nil)
 	if !loaded {
 		// 首次加载，需要从数据库获取
-		su, e := db.GetSliceUpload(map[string]any{"id": req.UploadID})
+		su, e := db.GetSliceUploadByTaskID(req.TaskID)
 		if e != nil {
-			log.Errorf("failed get slice upload [%d]: %+v", req.UploadID, e)
-			sliceupMap.Delete(req.UploadID) // 清理无效的 key
+			log.Errorf("failed get slice upload [%s]: %+v", req.TaskID, e)
+			sliceupMap.Delete(req.TaskID) // 清理无效的 key
 			return e
 		}
 		msu = &sliceup{
 			SliceUpload: su,
 		}
-		sliceupMap.Store(req.UploadID, msu)
+		sliceupMap.Store(req.TaskID, msu)
 	} else {
 		msu = sa.(*sliceup)
+		// 如果缓存存在，需要刷新数据库状态以确保数据一致性
+		if freshSu, err := db.GetSliceUploadByTaskID(req.TaskID); err == nil {
+			msu.Lock()
+			msu.SliceUpload = freshSu
+			msu.Unlock()
+		}
 	}
+	
+	// 确保并发安全的错误处理
 	defer func() {
 		if err != nil {
+			msu.Lock()
 			msu.Status = tables.SliceUploadStatusFailed
 			msu.Message = err.Error()
-			if updateErr := db.UpdateSliceUpload(msu.SliceUpload); updateErr != nil {
+			updateData := *msu.SliceUpload // 复制数据避免锁持有时间过长
+			msu.Unlock()
+			
+			if updateErr := db.UpdateSliceUpload(&updateData); updateErr != nil {
 				log.Errorf("Failed to update slice upload status: %v", updateErr)
 			}
 		}
 	}()
 
+	// 使用锁保护状态检查
+	msu.Lock()
 	// 检查分片是否已上传过
 	if tables.IsSliceUploaded(msu.SliceUploadStatus, int(req.SliceNum)) {
+		msu.Unlock()
 		log.Warnf("slice already uploaded,req:%+v", req)
 		return nil
 	}
+	msu.Unlock()
 
 	if req.SliceHash != "" {
+		msu.Lock()
 		sliceHash := []string{} // 分片hash
 
 		//验证分片hash值
 		if req.SliceNum == 0 { //第一个分片，slicehash是所有的分片hash
 			hs := strings.Split(req.SliceHash, ",")
 			if len(hs) != int(msu.SliceCnt) {
+				msu.Unlock()
 				msg := fmt.Sprintf("failed verify slice hash cnt req: %+v", req)
 				log.Error(msg)
 				return errors.New(msg)
 			}
 			// 更新分片hash
 			msu.SliceHash = req.SliceHash
-			if err := db.UpdateSliceUpload(msu.SliceUpload); err != nil {
-				log.Error("UpdateSliceUpload error", msu.SliceUpload, err)
+			msu.Status = tables.SliceUploadStatusUploading
+			updateData := *msu.SliceUpload // 复制数据
+			msu.Unlock()
+			
+			if err := db.UpdateSliceUpload(&updateData); err != nil {
+				log.Error("UpdateSliceUpload error", updateData, err)
 				return err
 			}
-			msu.Status = tables.SliceUploadStatusUploading
 			sliceHash = hs
 		} else { // 如果不是第一个分片，slicehash是当前分片hash
 			sliceHash = strings.Split(msu.SliceHash, ",")
-			if req.SliceHash != sliceHash[req.SliceNum] { //比对分片hash是否与之前上传的一致
+			if len(sliceHash) <= int(req.SliceNum) || req.SliceHash != sliceHash[req.SliceNum] { //比对分片hash是否与之前上传的一致
+				msu.Unlock()
 				msg := fmt.Sprintf("failed verify slice hash,req: [%+v]", req)
 				log.Error(msg)
 				return errors.New(msg)
 			}
+			msu.Unlock()
 		}
 	}
 
@@ -398,33 +483,10 @@ func UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadS
 		}
 
 	default: //其他网盘先缓存到本地
-		msu.Lock()
-		if msu.TmpFile == "" {
-			tf, err := os.CreateTemp(conf.Conf.TempDir, "file-*")
-			if err != nil {
-				msu.Unlock()
-				log.Error("CreateTemp error", req, err)
-				return err
-			}
-			abspath := tf.Name() //这里返回的是绝对路径
-			err = os.Truncate(abspath, int64(msu.Size))
-			if err != nil {
-				msu.Unlock()
-				log.Error("Truncate error", req, err)
-				return err
-			}
-			msu.TmpFile = abspath
-			msu.tmpFile = tf
+		if err := msu.ensureTmpFile(); err != nil {
+			log.Error("ensureTmpFile error", req, err)
+			return err
 		}
-		if msu.tmpFile == nil {
-			msu.tmpFile, err = os.OpenFile(msu.TmpFile, os.O_RDWR, 0644)
-			if err != nil {
-				msu.Unlock()
-				log.Error("OpenFile error", req, msu.TmpFile, err)
-				return err
-			}
-		}
-		msu.Unlock()
 
 		// 流式复制，减少内存占用
 		sw := &sliceWriter{
@@ -432,17 +494,21 @@ func UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadS
 			offset: int64(req.SliceNum) * int64(msu.SliceSize),
 		}
 		_, err := utils.CopyWithBuffer(sw, file)
-
 		if err != nil {
 			log.Error("Copy error", req, err)
 			return err
 		}
 	}
+	
+	// 原子性更新分片状态
+	msu.Lock()
 	tables.SetSliceUploaded(msu.SliceUploadStatus, int(req.SliceNum))
+	updateData := *msu.SliceUpload // 复制数据
+	msu.Unlock()
 
-	err = db.UpdateSliceUpload(msu.SliceUpload)
+	err = db.UpdateSliceUpload(&updateData)
 	if err != nil {
-		log.Error("UpdateSliceUpload error", msu.SliceUpload, err)
+		log.Error("UpdateSliceUpload error", updateData, err)
 		return err
 	}
 	return nil
@@ -450,54 +516,58 @@ func UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadS
 }
 
 // SliceUpComplete 完成分片上传
-func SliceUpComplete(ctx context.Context, storage driver.Driver, uploadID uint) (*reqres.UploadSliceCompleteResp, error) {
+func SliceUpComplete(ctx context.Context, storage driver.Driver, taskID string) (*reqres.UploadSliceCompleteResp, error) {
 	var msu *sliceup
 	var err error
 
-	sa, ok := sliceupMap.Load(uploadID)
+	sa, ok := sliceupMap.Load(taskID)
 	if !ok {
-		su, err := db.GetSliceUpload(map[string]any{"id": uploadID})
+		su, err := db.GetSliceUploadByTaskID(taskID)
 		if err != nil {
-			log.Errorf("failed get slice upload [%d]: %+v", uploadID, err)
+			log.Errorf("failed get slice upload [%s]: %+v", taskID, err)
 			return nil, err
 		}
 		msu = &sliceup{
 			SliceUpload: su,
 		}
-
 	} else {
 		msu = sa.(*sliceup)
 	}
-	if !tables.IsAllSliceUploaded(msu.SliceUploadStatus, msu.SliceCnt) {
+	
+	// 检查是否所有分片都已上传
+	msu.Lock()
+	allUploaded := tables.IsAllSliceUploaded(msu.SliceUploadStatus, msu.SliceCnt)
+	msu.Unlock()
+	
+	if !allUploaded {
 		return &reqres.UploadSliceCompleteResp{
 			Complete:          0,
 			SliceUploadStatus: msu.SliceUploadStatus,
-			UploadID:          msu.ID,
+			TaskID:            msu.TaskID,
 		}, nil
-
 	}
 
 	defer func() {
+		// 确保资源清理和缓存删除
+		msu.cleanup()
+		sliceupMap.Delete(msu.TaskID)
+		
 		if err != nil {
+			msu.Lock()
 			msu.Status = tables.SliceUploadStatusFailed
 			msu.Message = err.Error()
-			if updateErr := db.UpdateSliceUpload(msu.SliceUpload); updateErr != nil {
+			updateData := *msu.SliceUpload
+			msu.Unlock()
+			
+			if updateErr := db.UpdateSliceUpload(&updateData); updateErr != nil {
 				log.Errorf("Failed to update slice upload status: %v", updateErr)
 			}
-		}
-		// 确保资源清理
-		if msu.tmpFile != nil {
-			if closeErr := msu.tmpFile.Close(); closeErr != nil {
-				log.Errorf("Failed to close tmp file: %v", closeErr)
+		} else {
+			// 上传成功后从数据库中删除记录，允许重复上传
+			if deleteErr := db.DeleteSliceUploadByTaskID(msu.TaskID); deleteErr != nil {
+				log.Errorf("Failed to delete slice upload record: %v", deleteErr)
 			}
 		}
-		if msu.TmpFile != "" {
-			if removeErr := os.Remove(msu.TmpFile); removeErr != nil && !os.IsNotExist(removeErr) {
-				log.Errorf("Failed to remove tmp file %s: %v", msu.TmpFile, removeErr)
-			}
-		}
-		sliceupMap.Delete(msu.ID)
-
 	}()
 	switch s := storage.(type) {
 	case driver.IUploadSliceComplete:
@@ -506,26 +576,37 @@ func SliceUpComplete(ctx context.Context, storage driver.Driver, uploadID uint) 
 			log.Error("UploadSliceComplete error", msu.SliceUpload, err)
 			return nil, err
 		}
+		
+		msu.Lock()
 		msu.Status = tables.SliceUploadStatusComplete
-		db.UpdateSliceUpload(msu.SliceUpload)
-		rsp := &reqres.UploadSliceCompleteResp{
-			Complete: 1,
-			UploadID: msu.ID,
+		updateData := *msu.SliceUpload
+		msu.Unlock()
+		
+		if updateErr := db.UpdateSliceUpload(&updateData); updateErr != nil {
+			log.Errorf("Failed to update slice upload status to complete: %v", updateErr)
 		}
-		return rsp, nil
+		
+		return &reqres.UploadSliceCompleteResp{
+			Complete: 1,
+			TaskID:   msu.TaskID,
+		}, nil
 
 	default:
-		//其他网盘客户端上传到本地后，上传到网盘，使用任务处理
-		if msu.tmpFile == nil {
-			err := fmt.Errorf("tmp file not found [%d]", uploadID)
+		// 其他网盘客户端上传到本地后，上传到网盘，使用任务处理
+		msu.Lock()
+		tmpFile := msu.tmpFile
+		msu.Unlock()
+		
+		if tmpFile == nil {
+			err := fmt.Errorf("tmp file not found [%s]", taskID)
 			log.Error(err)
 			return nil, err
 		}
+		
 		var hashInfo utils.HashInfo
 		if msu.HashMd5 != "" {
 			hashInfo = utils.NewHashInfo(utils.MD5, msu.HashMd5)
-		}
-		if msu.HashSha1 != "" {
+		} else if msu.HashSha1 != "" {
 			hashInfo = utils.NewHashInfo(utils.SHA1, msu.HashSha1)
 		}
 
@@ -538,11 +619,15 @@ func SliceUpComplete(ctx context.Context, storage driver.Driver, uploadID uint) 
 			},
 		}
 		file.Mimetype = utils.GetMimeType(msu.Name)
+		
 		if msu.AsTask {
-			file.SetTmpFile(msu.tmpFile)
-			// 置空，避免defer中被清理
+			file.SetTmpFile(tmpFile)
+			// 防止defer中清理文件
+			msu.Lock()
 			msu.tmpFile = nil
 			msu.TmpFile = ""
+			msu.Unlock()
+			
 			_, err = putAsTask(ctx, msu.DstPath, file)
 			if err != nil {
 				log.Error("putAsTask error", msu.SliceUpload, err)
@@ -550,10 +635,11 @@ func SliceUpComplete(ctx context.Context, storage driver.Driver, uploadID uint) 
 			}
 			return &reqres.UploadSliceCompleteResp{
 				Complete: 2,
-				UploadID: msu.ID,
+				TaskID:   msu.TaskID,
 			}, nil
 		}
-		file.Reader = msu.tmpFile
+		
+		file.Reader = tmpFile
 		err = op.Put(ctx, storage, msu.ActualPath, file, nil)
 		if err != nil {
 			log.Error("Put error", msu.SliceUpload, err)
@@ -561,8 +647,7 @@ func SliceUpComplete(ctx context.Context, storage driver.Driver, uploadID uint) 
 		}
 		return &reqres.UploadSliceCompleteResp{
 			Complete: 1,
-			UploadID: msu.ID,
+			TaskID:   msu.TaskID,
 		}, nil
 	}
-
 }

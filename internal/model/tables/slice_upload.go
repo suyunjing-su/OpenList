@@ -18,6 +18,7 @@ const (
 // SliceUpload 分片上传数据表
 type SliceUpload struct {
 	Base
+	TaskID            string `json:"task_id" gorm:"uniqueIndex;type:varchar(36)"`               // 任务ID，使用UUID
 	PreupID           string `json:"preup_id"`                                                     // 网盘返回的预上传id
 	SliceSize         int64  `json:"slice_size"`                                                   // 分片大小，单位：字节
 	DstID             string `json:"dst_id"`                                                       // 目标文件夹ID，部分网盘需要

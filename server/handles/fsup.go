@@ -233,15 +233,26 @@ func FsPreup(c *gin.Context) {
 	req := &reqres.PreupReq{}
 	err := c.ShouldBindJSON(req)
 	if err != nil {
-		common.ErrorResp(c, err, 400)
+		common.ErrorResp(c, fmt.Errorf("invalid request body: %w", err), 400)
 		return
 	}
+	
+	// 基本参数验证
+	if req.Name == "" {
+		common.ErrorResp(c, fmt.Errorf("file name is required"), 400)
+		return
+	}
+	if req.Size <= 0 {
+		common.ErrorResp(c, fmt.Errorf("file size must be greater than 0"), 400)
+		return
+	}
+	
 	storage := c.Request.Context().Value(conf.StorageKey).(driver.Driver)
 	path := c.Request.Context().Value(conf.PathKey).(string)
 
 	res, err := fs.Preup(c.Request.Context(), storage, path, req)
 	if err != nil {
-		common.ErrorResp(c, err, 500)
+		common.ErrorResp(c, fmt.Errorf("preup failed: %w", err), 500)
 		return
 	}
 	common.SuccessResp(c, res)
@@ -253,34 +264,43 @@ func FsUpSlice(c *gin.Context) {
 	req.SliceHash = c.PostForm("slice_hash")
 	sn, err := strconv.ParseUint(c.PostForm("slice_num"), 10, 32)
 	if err != nil {
-		common.ErrorResp(c, err, 400)
+		common.ErrorResp(c, fmt.Errorf("invalid slice_num: %w", err), 400)
 		return
 	}
 	req.SliceNum = uint(sn)
-	upid, err := strconv.ParseUint(c.PostForm("upload_id"), 10, 64)
-	if err != nil {
-		common.ErrorResp(c, err, 400)
+	req.TaskID = c.PostForm("task_id")
+	if req.TaskID == "" {
+		common.ErrorResp(c, fmt.Errorf("task_id is required"), 400)
 		return
 	}
-	req.UploadID = uint(upid)
 
 	file, err := c.FormFile("slice")
 	if err != nil {
-		common.ErrorResp(c, err, 400)
+		common.ErrorResp(c, fmt.Errorf("failed to get slice file: %w", err), 400)
 		return
 	}
+	
+	if file.Size == 0 {
+		common.ErrorResp(c, fmt.Errorf("slice file is empty"), 400)
+		return
+	}
+	
 	fd, err := file.Open()
 	if err != nil {
-		common.ErrorResp(c, err, 500)
+		common.ErrorResp(c, fmt.Errorf("failed to open slice file: %w", err), 500)
 		return
 	}
-	defer fd.Close()
+	defer func() {
+		if closeErr := fd.Close(); closeErr != nil {
+			log.Errorf("Failed to close slice file: %v", closeErr)
+		}
+	}()
 
 	storage := c.Request.Context().Value(conf.StorageKey).(driver.Driver)
 
 	err = fs.UploadSlice(c.Request.Context(), storage, req, fd)
 	if err != nil {
-		common.ErrorResp(c, err, 500)
+		common.ErrorResp(c, fmt.Errorf("upload slice failed: %w", err), 500)
 		return
 	}
 	common.SuccessResp(c)
@@ -291,15 +311,20 @@ func FsUpSliceComplete(c *gin.Context) {
 	req := &reqres.UploadSliceCompleteReq{}
 	err := c.ShouldBindJSON(req)
 	if err != nil {
-		common.ErrorResp(c, err, 400)
+		common.ErrorResp(c, fmt.Errorf("invalid request body: %w", err), 400)
 		return
 	}
+	
+	if req.TaskID == "" {
+		common.ErrorResp(c, fmt.Errorf("task_id is required"), 400)
+		return
+	}
+	
 	storage := c.Request.Context().Value(conf.StorageKey).(driver.Driver)
-	rsp, err := fs.SliceUpComplete(c.Request.Context(), storage, req.UploadID)
+	rsp, err := fs.SliceUpComplete(c.Request.Context(), storage, req.TaskID)
 	if err != nil {
-		common.ErrorResp(c, err, 500)
+		common.ErrorResp(c, fmt.Errorf("slice upload complete failed: %w", err), 500)
 		return
 	}
 	common.SuccessResp(c, rsp)
-
 }

@@ -262,6 +262,15 @@ func (d *Open123) SliceUpload(ctx context.Context, req *tables.SliceUpload, slic
 	if int(sliceno) >= len(sh) {
 		return fmt.Errorf("slice number %d out of range, total slices: %d", sliceno, len(sh))
 	}
+	
+	if req.PreupID == "" {
+		return fmt.Errorf("preupload ID is empty for slice %d", sliceno)
+	}
+	
+	if req.Server == "" {
+		return fmt.Errorf("upload server is empty for slice %d", sliceno)
+	}
+	
 	r := &UploadSliceReq{
 		Name:        req.Name,
 		PreuploadID: req.PreupID,
@@ -270,13 +279,23 @@ func (d *Open123) SliceUpload(ctx context.Context, req *tables.SliceUpload, slic
 		SliceMD5:    sh[sliceno],
 		SliceNo:     int(sliceno) + 1,
 	}
-	return d.uploadSlice(r)
+	
+	if err := d.uploadSlice(r); err != nil {
+		return fmt.Errorf("upload slice %d failed: %w", sliceno, err)
+	}
+	return nil
 }
 
 // UploadSliceComplete 分片上传完成
 func (d *Open123) UploadSliceComplete(ctx context.Context, su *tables.SliceUpload) error {
-
-	return d.sliceUpComplete(su.PreupID)
+	if su.PreupID == "" {
+		return fmt.Errorf("preupload ID is empty")
+	}
+	
+	if err := d.sliceUpComplete(su.PreupID); err != nil {
+		return fmt.Errorf("slice upload complete failed: %w", err)
+	}
+	return nil
 }
 
 var _ driver.Driver = (*Open123)(nil)
