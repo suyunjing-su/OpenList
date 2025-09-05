@@ -431,7 +431,7 @@ func UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadS
 			file:   msu.tmpFile,
 			offset: int64(req.SliceNum) * int64(msu.SliceSize),
 		}
-		_, err := io.Copy(sw, file)
+		_, err := utils.CopyWithBuffer(sw, file)
 
 		if err != nil {
 			log.Error("Copy error", req, err)
@@ -516,9 +516,9 @@ func SliceUpComplete(ctx context.Context, storage driver.Driver, uploadID uint) 
 
 	default:
 		//其他网盘客户端上传到本地后，上传到网盘，使用任务处理
-		fd, err := os.Open(msu.TmpFile)
-		if err != nil {
-			log.Error("Open error", msu.TmpFile, err)
+		if msu.tmpFile == nil {
+			err := fmt.Errorf("tmp file not found [%d]", uploadID)
+			log.Error(err)
 			return nil, err
 		}
 		var hashInfo utils.HashInfo
@@ -536,11 +536,13 @@ func SliceUpComplete(ctx context.Context, storage driver.Driver, uploadID uint) 
 				Modified: time.Now(),
 				HashInfo: hashInfo,
 			},
-			Reader:       fd,
-			Mimetype:     "application/octet-stream",
-			WebPutAsTask: false,
 		}
+		file.Mimetype = utils.GetMimeType(msu.Name)
 		if msu.AsTask {
+			file.SetTmpFile(msu.tmpFile)
+			// 置空，避免defer中被清理
+			msu.tmpFile = nil
+			msu.TmpFile = ""
 			_, err = putAsTask(ctx, msu.DstPath, file)
 			if err != nil {
 				log.Error("putAsTask error", msu.SliceUpload, err)
@@ -551,6 +553,7 @@ func SliceUpComplete(ctx context.Context, storage driver.Driver, uploadID uint) 
 				UploadID: msu.ID,
 			}, nil
 		}
+		file.Reader = msu.tmpFile
 		err = op.Put(ctx, storage, msu.ActualPath, file, nil)
 		if err != nil {
 			log.Error("Put error", msu.SliceUpload, err)
@@ -560,7 +563,6 @@ func SliceUpComplete(ctx context.Context, storage driver.Driver, uploadID uint) 
 			Complete: 1,
 			UploadID: msu.ID,
 		}, nil
-
 	}
 
 }
