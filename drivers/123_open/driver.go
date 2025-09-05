@@ -225,7 +225,7 @@ func (d *Open123) Put(ctx context.Context, dstDir model.Obj, file model.FileStre
 }
 
 // Preup 预上传
-func (d *Open123) Preup(c context.Context, srcobj model.Obj, req *reqres.PreupReq) (*model.PreupInfo, error) {
+func (d *Open123) Preup(ctx context.Context, srcobj model.Obj, req *reqres.PreupReq) (*model.PreupInfo, error) {
 	pid, err := strconv.ParseUint(srcobj.GetID(), 10, 64)
 	if err != nil {
 		return nil, err
@@ -256,8 +256,11 @@ func (d *Open123) Preup(c context.Context, srcobj model.Obj, req *reqres.PreupRe
 }
 
 // UploadSlice 上传分片
-func (d *Open123) SliceUpload(c context.Context, req *tables.SliceUpload, sliceno uint, fd io.Reader) error {
+func (d *Open123) SliceUpload(ctx context.Context, req *tables.SliceUpload, sliceno uint, fd io.Reader) error {
 	sh := strings.Split(req.SliceHash, ",")
+	if int(sliceno) >= len(sh) {
+		return fmt.Errorf("slice number %d out of range, total slices: %d", sliceno, len(sh))
+	}
 	r := &UploadSliceReq{
 		Name:        req.Name,
 		PreuploadID: req.PreupID,
@@ -270,7 +273,7 @@ func (d *Open123) SliceUpload(c context.Context, req *tables.SliceUpload, slicen
 }
 
 // UploadSliceComplete 分片上传完成
-func (d *Open123) UploadSliceComplete(c context.Context, su *tables.SliceUpload) error {
+func (d *Open123) UploadSliceComplete(ctx context.Context, su *tables.SliceUpload) error {
 
 	return d.sliceUpComplete(su.PreupID)
 }

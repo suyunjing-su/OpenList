@@ -328,11 +328,14 @@ func UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadS
 	var msu *sliceup
 	var err error
 
-	sa, ok := sliceupMap.Load(req.UploadID)
-	if !ok {
+	// 使用 LoadOrStore 避免并发竞态条件
+	sa, loaded := sliceupMap.LoadOrStore(req.UploadID, nil)
+	if !loaded {
+		// 首次加载，需要从数据库获取
 		su, e := db.GetSliceUpload(map[string]any{"id": req.UploadID})
 		if e != nil {
 			log.Errorf("failed get slice upload [%d]: %+v", req.UploadID, e)
+			sliceupMap.Delete(req.UploadID) // 清理无效的 key
 			return e
 		}
 		msu = &sliceup{
@@ -346,7 +349,9 @@ func UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadS
 		if err != nil {
 			msu.Status = tables.SliceUploadStatusFailed
 			msu.Message = err.Error()
-			db.UpdateSliceUpload(msu.SliceUpload)
+			if updateErr := db.UpdateSliceUpload(msu.SliceUpload); updateErr != nil {
+				log.Errorf("Failed to update slice upload status: %v", updateErr)
+			}
 		}
 	}()
 
@@ -476,10 +481,20 @@ func SliceUpComplete(ctx context.Context, storage driver.Driver, uploadID uint) 
 		if err != nil {
 			msu.Status = tables.SliceUploadStatusFailed
 			msu.Message = err.Error()
-			db.UpdateSliceUpload(msu.SliceUpload)
+			if updateErr := db.UpdateSliceUpload(msu.SliceUpload); updateErr != nil {
+				log.Errorf("Failed to update slice upload status: %v", updateErr)
+			}
 		}
+		// 确保资源清理
 		if msu.tmpFile != nil {
-			msu.tmpFile.Close()
+			if closeErr := msu.tmpFile.Close(); closeErr != nil {
+				log.Errorf("Failed to close tmp file: %v", closeErr)
+			}
+		}
+		if msu.TmpFile != "" {
+			if removeErr := os.Remove(msu.TmpFile); removeErr != nil && !os.IsNotExist(removeErr) {
+				log.Errorf("Failed to remove tmp file %s: %v", msu.TmpFile, removeErr)
+			}
 		}
 		sliceupMap.Delete(msu.ID)
 
@@ -499,9 +514,15 @@ func SliceUpComplete(ctx context.Context, storage driver.Driver, uploadID uint) 
 		}
 		// 清理缓存及临时文件
 		if msu.tmpFile != nil {
-			msu.tmpFile.Close()
+			if closeErr := msu.tmpFile.Close(); closeErr != nil {
+				log.Errorf("Failed to close tmp file: %v", closeErr)
+			}
 		}
-		os.Remove(msu.TmpFile)
+		if msu.TmpFile != "" {
+			if removeErr := os.Remove(msu.TmpFile); removeErr != nil && !os.IsNotExist(removeErr) {
+				log.Errorf("Failed to remove tmp file %s: %v", msu.TmpFile, removeErr)
+			}
+		}
 
 		return rsp, nil
 
@@ -547,7 +568,11 @@ func SliceUpComplete(ctx context.Context, storage driver.Driver, uploadID uint) 
 			log.Error("Put error", msu.SliceUpload, err)
 			return nil, err
 		}
-		os.Remove(msu.TmpFile)
+		if msu.TmpFile != "" {
+			if removeErr := os.Remove(msu.TmpFile); removeErr != nil && !os.IsNotExist(removeErr) {
+				log.Errorf("Failed to remove tmp file %s: %v", msu.TmpFile, removeErr)
+			}
+		}
 		return &reqres.UploadSliceCompleteResp{
 			Complete: 1,
 			UploadID: msu.ID,

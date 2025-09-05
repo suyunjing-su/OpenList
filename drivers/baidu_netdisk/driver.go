@@ -18,7 +18,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
-	"github.com/OpenListTeam/OpenList/v4/internal/errs"
+	"github.com/OpenListTeam/OpenList/		err := d.uploadSlice(ctx, map[string]string{4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/model/reqres"
 	"github.com/OpenListTeam/OpenList/v4/internal/model/tables"
@@ -378,7 +378,7 @@ func (d *BaiduNetdisk) uploadSlice(ctx context.Context, params map[string]string
 }
 
 // SliceUpload 上传分片
-func (d *BaiduNetdisk) SliceUpload(c context.Context, req *tables.SliceUpload, sliceno uint, fd io.Reader) error {
+func (d *BaiduNetdisk) SliceUpload(ctx context.Context, req *tables.SliceUpload, sliceno uint, fd io.Reader) error {
 	fp := filepath.Join(req.DstPath, req.Name)
 	if sliceno == 0 { //第一个分片需要先执行预上传
 		rtype := 1
