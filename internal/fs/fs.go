@@ -195,15 +195,15 @@ func PutURL(ctx context.Context, path, dstName, urlStr string) error {
 
 // Preup 预上传 - 使用新的管理器重构
 func Preup(c context.Context, s driver.Driver, actualPath string, req *reqres.PreupReq) (*reqres.PreupResp, error) {
-	return globalSliceManager.CreateSession(c, s, actualPath, req)
+	return getGlobalSliceManager().CreateSession(c, s, actualPath, req)
 }
 
 // UploadSlice 上传切片 - 使用新的管理器重构  
 func UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadSliceReq, file multipart.File) error {
-	return globalSliceManager.UploadSlice(ctx, storage, req, file)
+	return getGlobalSliceManager().UploadSlice(ctx, storage, req, file)
 }
 
 // SliceUpComplete 完成分片上传 - 使用新的管理器重构
 func SliceUpComplete(ctx context.Context, storage driver.Driver, taskID string) (*reqres.UploadSliceCompleteResp, error) {
-	return globalSliceManager.CompleteUpload(ctx, storage, taskID)
+	return getGlobalSliceManager().CompleteUpload(ctx, storage, taskID)
 }

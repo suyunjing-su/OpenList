@@ -39,8 +39,12 @@ type SliceUploadSession struct {
 
 // NewSliceUploadManager 创建分片上传管理器
 func NewSliceUploadManager() *SliceUploadManager {
+	tempDir := os.TempDir() // 默认使用系统临时目录
+	if conf.Conf != nil && conf.Conf.TempDir != "" {
+		tempDir = conf.Conf.TempDir
+	}
 	return &SliceUploadManager{
-		tempDir: conf.Conf.TempDir,
+		tempDir: tempDir,
 	}
 }
 
@@ -421,7 +425,11 @@ func (s *SliceUploadSession) ensureTmpFile() error {
 	defer s.mutex.Unlock()
 	
 	if s.TmpFile == "" {
-		tf, err := os.CreateTemp(conf.Conf.TempDir, "file-*")
+		tempDir := os.TempDir() // 默认使用系统临时目录
+		if conf.Conf != nil && conf.Conf.TempDir != "" {
+			tempDir = conf.Conf.TempDir
+		}
+		tf, err := os.CreateTemp(tempDir, "file-*")
 		if err != nil {
 			return fmt.Errorf("CreateTemp error: %w", err)
 		}
@@ -468,8 +476,17 @@ func (s *SliceUploadSession) cleanup() {
 	}
 }
 
-// 全局管理器实例
-var globalSliceManager = NewSliceUploadManager()
+// 全局管理器实例使用延迟初始化
+var globalSliceManager *SliceUploadManager
+var globalSliceManagerOnce sync.Once
+
+// getGlobalSliceManager 获取全局分片上传管理器（延迟初始化）
+func getGlobalSliceManager() *SliceUploadManager {
+	globalSliceManagerOnce.Do(func() {
+		globalSliceManager = NewSliceUploadManager()
+	})
+	return globalSliceManager
+}
 
 // sliceWriter 分片写入器 - 保持原始实现
 type sliceWriter struct {
