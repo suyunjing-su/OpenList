@@ -18,7 +18,6 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/gin-gonic/gin"
-	log "github.com/sirupsen/logrus"
 )
 
 func getLastModified(c *gin.Context) time.Time {
@@ -260,51 +259,52 @@ func FsPreup(c *gin.Context) {
 	common.SuccessResp(c, res)
 }
 
-// FsUpSlice 上传分片
+// FsUpSlice 流式上传分片 - 使用PUT方法进行流式上传，避免表单上传的内存占用
 func FsUpSlice(c *gin.Context) {
-	req := &reqres.UploadSliceReq{}
-	req.SliceHash = c.PostForm("slice_hash")
-	sn, err := strconv.ParseUint(c.PostForm("slice_num"), 10, 32)
-	if err != nil {
-		common.ErrorResp(c, fmt.Errorf("invalid slice_num: %w", err), 400)
-		return
-	}
-	req.SliceNum = uint(sn)
-	req.TaskID = c.PostForm("task_id")
-	if req.TaskID == "" {
-		common.ErrorResp(c, fmt.Errorf("task_id is required"), 400)
-		return
-	}
-
-	file, err := c.FormFile("slice")
-	if err != nil {
-		common.ErrorResp(c, fmt.Errorf("failed to get slice file: %w", err), 400)
+	// 从HTTP头获取参数
+	taskID := c.GetHeader("X-Task-ID")
+	if taskID == "" {
+		common.ErrorResp(c, fmt.Errorf("X-Task-ID header is required"), 400)
 		return
 	}
 	
-	if file.Size == 0 {
-		common.ErrorResp(c, fmt.Errorf("slice file is empty"), 400)
+	sliceNumStr := c.GetHeader("X-Slice-Num")
+	if sliceNumStr == "" {
+		common.ErrorResp(c, fmt.Errorf("X-Slice-Num header is required"), 400)
 		return
 	}
 	
-	fd, err := file.Open()
+	sliceNum, err := strconv.ParseUint(sliceNumStr, 10, 32)
 	if err != nil {
-		common.ErrorResp(c, fmt.Errorf("failed to open slice file: %w", err), 500)
+		common.ErrorResp(c, fmt.Errorf("invalid X-Slice-Num: %w", err), 400)
 		return
 	}
-	defer func() {
-		if closeErr := fd.Close(); closeErr != nil {
-			log.Errorf("Failed to close slice file: %v", closeErr)
-		}
-	}()
-
+	
+	sliceHash := c.GetHeader("X-Slice-Hash")
+	
+	// 构建请求对象
+	req := &reqres.UploadSliceReq{
+		TaskID:    taskID,
+		SliceHash: sliceHash,
+		SliceNum:  uint(sliceNum),
+	}
+	
+	// 获取请求体作为流
+	reader := c.Request.Body
+	if reader == nil {
+		common.ErrorResp(c, fmt.Errorf("request body is required"), 400)
+		return
+	}
+	
 	storage := c.Request.Context().Value(conf.StorageKey).(driver.Driver)
-
-	err = fs.UploadSlice(c.Request.Context(), storage, req, fd)
+	
+	// 调用流式上传分片函数
+	err = fs.UploadSlice(c.Request.Context(), storage, req, reader)
 	if err != nil {
 		common.ErrorResp(c, fmt.Errorf("upload slice failed: %w", err), 500)
 		return
 	}
+	
 	common.SuccessResp(c)
 }
 

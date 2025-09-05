@@ -208,7 +208,7 @@ func _fs(g *gin.RouterGroup) {
 
 	g.GET("/upload/info", middlewares.FsSliceUp, handles.FsUpInfo)
 	g.POST("/preup", middlewares.FsSliceUp, handles.FsPreup)
-	g.POST("/slice_upload", middlewares.FsSliceUp, handles.FsUpSlice)
+	g.PUT("/slice_upload", middlewares.FsSliceUp, handles.FsUpSlice)
 	g.POST("/slice_upload_complete", middlewares.FsSliceUp, handles.FsUpSliceComplete)
 
 	// g.POST("/add_aria2", handles.AddOfflineDownload)

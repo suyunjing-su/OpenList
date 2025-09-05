@@ -43,6 +43,23 @@ func DeleteSliceUploadByTaskID(taskID string) error {
 	return errors.WithStack(db.Where("task_id = ?", taskID).Delete(&tables.SliceUpload{}).Error)
 }
 
+// GetIncompleteSliceUploads 获取所有未完成的分片上传任务（用于重启恢复）
+func GetIncompleteSliceUploads() ([]*tables.SliceUpload, error) {
+	var uploads []*tables.SliceUpload
+	err := db.Where("status IN (?)", []int{
+		tables.SliceUploadStatusWaiting,
+		tables.SliceUploadStatusUploading,
+		tables.SliceUploadStatusProxyComplete,
+		tables.SliceUploadStatusPendingComplete,
+	}).Find(&uploads).Error
+	
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	
+	return uploads, nil
+}
+
 // UpdateSliceUploadWithTx 使用事务更新分片上传状态，确保数据一致性
 func UpdateSliceUploadWithTx(su *tables.SliceUpload) error {
 	return errors.WithStack(db.Transaction(func(tx *gorm.DB) error {

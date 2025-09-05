@@ -13,6 +13,8 @@ const (
 	SliceUploadStatusFailed
 	// SliceUploadStatusProxyComplete 成功上传到代理服务，等待上传到网盘
 	SliceUploadStatusProxyComplete
+	// SliceUploadStatusPendingComplete 等待完成（所有切片已上传，等待最终完成处理）
+	SliceUploadStatusPendingComplete
 )
 
 // SliceUpload 分片上传数据表

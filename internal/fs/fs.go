@@ -3,7 +3,6 @@ package fs
 import (
 	"context"
 	"io"
-	"mime/multipart"
 
 	log "github.com/sirupsen/logrus"
 
@@ -198,9 +197,9 @@ func Preup(c context.Context, s driver.Driver, actualPath string, req *reqres.Pr
 	return getGlobalSliceManager().CreateSession(c, s, actualPath, req)
 }
 
-// UploadSlice 上传切片 - 使用新的管理器重构  
-func UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadSliceReq, file multipart.File) error {
-	return getGlobalSliceManager().UploadSlice(ctx, storage, req, file)
+// UploadSlice 流式上传切片 - 使用新的管理器重构，支持流式上传
+func UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadSliceReq, reader io.Reader) error {
+	return getGlobalSliceManager().UploadSlice(ctx, storage, req, reader)
 }
 
 // SliceUpComplete 完成分片上传 - 使用新的管理器重构
