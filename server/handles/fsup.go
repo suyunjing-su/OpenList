@@ -1,6 +1,7 @@
 package handles
 
 import (
+	"fmt"
 	"io"
 	"net/url"
 	stdpath "path"
@@ -17,6 +18,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
 func getLastModified(c *gin.Context) time.Time {
