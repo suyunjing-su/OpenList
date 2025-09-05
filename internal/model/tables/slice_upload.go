@@ -60,3 +60,14 @@ func IsAllSliceUploaded(status []byte, sliceCnt uint) bool {
 	}
 	return true
 }
+
+// CountUploadedSlices 统计已上传的分片数量
+func CountUploadedSlices(status []byte) uint {
+	count := uint(0)
+	for i := 0; i < len(status)*8; i++ {
+		if status[i/8]&(1<<(i%8)) != 0 {
+			count++
+		}
+	}
+	return count
+}

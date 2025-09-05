@@ -17,6 +17,11 @@ func Init(d *gorm.DB) {
 	if err != nil {
 		log.Fatalf("failed migrate database: %s", err.Error())
 	}
+	
+	// 清理启动前遗留的孤儿分片上传任务
+	if err := CleanupOrphanedSliceUploads(); err != nil {
+		log.Errorf("Failed to cleanup orphaned slice uploads: %v", err)
+	}
 }
 
 func AutoMigrate(dst ...interface{}) error {

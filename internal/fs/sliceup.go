@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"mime/multipart"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+	"github.com/OpenListTeam/OpenList/v4/pkg/tempdir"
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"gorm.io/gorm"
@@ -39,12 +41,9 @@ type SliceUploadSession struct {
 
 // NewSliceUploadManager 创建分片上传管理器
 func NewSliceUploadManager() *SliceUploadManager {
-	tempDir := os.TempDir() // 默认使用系统临时目录
-	if conf.Conf != nil && conf.Conf.TempDir != "" {
-		tempDir = conf.Conf.TempDir
-	}
+	tempDirPath := tempdir.GetPersistentTempDir()
 	return &SliceUploadManager{
-		tempDir: tempDir,
+		tempDir: tempDirPath,
 	}
 }
 
@@ -74,14 +73,40 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 	}
 
 	if su.ID != 0 { // 找到未完成的上传任务，支持断点续传
-		session := &SliceUploadSession{SliceUpload: su}
-		m.cache.Store(su.TaskID, session)
-		return &reqres.PreupResp{
-			TaskID:            su.TaskID,
-			SliceSize:         su.SliceSize,
-			SliceCnt:          su.SliceCnt,
-			SliceUploadStatus: su.SliceUploadStatus,
-		}, nil
+		// 验证临时文件是否仍然存在（重启后可能被清理）
+		if su.TmpFile != "" {
+			if _, err := os.Stat(su.TmpFile); os.IsNotExist(err) {
+				// 临时文件丢失，清理数据库记录，重新开始
+				log.Warnf("Temporary file lost after restart, cleaning up task: %s", su.TaskID)
+				if deleteErr := db.DeleteSliceUploadByTaskID(su.TaskID); deleteErr != nil {
+					log.Errorf("Failed to delete lost slice upload task: %v", deleteErr)
+				}
+				// 继续创建新任务
+			} else {
+				// 临时文件存在，可以继续断点续传
+				session := &SliceUploadSession{SliceUpload: su}
+				m.cache.Store(su.TaskID, session)
+				log.Infof("Resuming slice upload after restart: %s, completed slices: %d/%d", 
+					su.TaskID, tables.CountUploadedSlices(su.SliceUploadStatus), su.SliceCnt)
+				return &reqres.PreupResp{
+					TaskID:            su.TaskID,
+					SliceSize:         su.SliceSize,
+					SliceCnt:          su.SliceCnt,
+					SliceUploadStatus: su.SliceUploadStatus,
+				}, nil
+			}
+		} else {
+			// 原生分片上传（如123open/baidu），无需临时文件
+			session := &SliceUploadSession{SliceUpload: su}
+			m.cache.Store(su.TaskID, session)
+			log.Infof("Resuming native slice upload after restart: %s", su.TaskID)
+			return &reqres.PreupResp{
+				TaskID:            su.TaskID,
+				SliceSize:         su.SliceSize,
+				SliceCnt:          su.SliceCnt,
+				SliceUploadStatus: su.SliceUploadStatus,
+			}, nil
+		}
 	}
 	
 	srcobj, err := op.Get(ctx, storage, actualPath)
@@ -419,30 +444,38 @@ func (m *SliceUploadManager) CompleteUpload(ctx context.Context, storage driver.
 	}
 }
 
-// ensureTmpFile 确保临时文件存在且正确初始化，线程安全 - 保持原始实现
+// ensureTmpFile 确保临时文件存在且正确初始化，线程安全 - 使用持久化目录
 func (s *SliceUploadSession) ensureTmpFile() error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	
 	if s.TmpFile == "" {
-		tempDir := os.TempDir() // 默认使用系统临时目录
-		if conf.Conf != nil && conf.Conf.TempDir != "" {
-			tempDir = conf.Conf.TempDir
-		}
-		tf, err := os.CreateTemp(tempDir, "file-*")
+		tempDirPath := tempdir.GetPersistentTempDir()
+		
+		// 使用TaskID作为文件名的一部分，确保唯一性和可识别性
+		filename := fmt.Sprintf("slice_upload_%s_%s", s.TaskID, s.Name)
+		// 清理文件名中的特殊字符
+		filename = strings.ReplaceAll(filename, "/", "_")
+		filename = strings.ReplaceAll(filename, "\\", "_")
+		filename = strings.ReplaceAll(filename, ":", "_")
+		
+		tmpPath := filepath.Join(tempDirPath, filename)
+		
+		tf, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_RDWR, 0644)
 		if err != nil {
-			return fmt.Errorf("CreateTemp error: %w", err)
+			return fmt.Errorf("create persistent temp file error: %w", err)
 		}
 		
-		abspath := tf.Name() //这里返回的是绝对路径
-		if err = os.Truncate(abspath, int64(s.Size)); err != nil {
+		if err = os.Truncate(tmpPath, int64(s.Size)); err != nil {
 			tf.Close() // 确保文件被关闭
-			os.Remove(abspath) // 清理文件
-			return fmt.Errorf("Truncate error: %w", err)
+			os.Remove(tmpPath) // 清理文件
+			return fmt.Errorf("truncate persistent temp file error: %w", err)
 		}
 		
-		s.TmpFile = abspath
+		s.TmpFile = tmpPath
 		s.tmpFile = tf
+		
+		log.Debugf("Created persistent temp file: %s", tmpPath)
 		return nil
 	}
 	
@@ -450,8 +483,9 @@ func (s *SliceUploadSession) ensureTmpFile() error {
 		var err error
 		s.tmpFile, err = os.OpenFile(s.TmpFile, os.O_RDWR, 0644)
 		if err != nil {
-			return fmt.Errorf("OpenFile error: %w", err)
+			return fmt.Errorf("reopen persistent temp file error: %w", err)
 		}
+		log.Debugf("Reopened persistent temp file: %s", s.TmpFile)
 	}
 	return nil
 }
