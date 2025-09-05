@@ -21,6 +21,7 @@ import (
 type Open123 struct {
 	model.Storage
 	Addition
+	UID uint64
 }
 
 func (d *Open123) Config() driver.Config {
@@ -94,7 +95,7 @@ func (d *Open123) Link(ctx context.Context, file model.Obj, args model.LinkArgs)
 			}, nil
 		}
 
-		u, err := d.getUserInfo()
+		uid, err := d.getUID()
 		if err != nil {
 			return nil, err
 		}
@@ -102,7 +103,7 @@ func (d *Open123) Link(ctx context.Context, file model.Obj, args model.LinkArgs)
 		duration := time.Duration(d.DirectLinkValidDuration) * time.Minute
 
 		newURL, err := d.SignURL(res.Data.URL, d.DirectLinkPrivateKey,
-			u.Data.UID, duration)
+			uid, duration)
 		if err != nil {
 			return nil, err
 		}
