@@ -18,7 +18,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
-	"github.com/OpenListTeam/OpenList/		err := d.uploadSlice(ctx, map[string]string{4/internal/errs"
+	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/model/reqres"
 	"github.com/OpenListTeam/OpenList/v4/internal/model/tables"
@@ -400,7 +400,7 @@ func (d *BaiduNetdisk) SliceUpload(ctx context.Context, req *tables.SliceUpload,
 		}
 		req.PreupID = precreateResp.Uploadid
 	}
-	err := d.uploadSlice(c, map[string]string{
+	err := d.uploadSlice(ctx, map[string]string{
 		"method":       "upload",
 		"access_token": d.AccessToken,
 		"type":         "tmpfile",
