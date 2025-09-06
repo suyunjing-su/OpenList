@@ -18,6 +18,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/model/tables"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
+	"github.com/OpenListTeam/OpenList/v4/pkg/singleflight"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
@@ -27,7 +28,8 @@ import (
 
 // SliceUploadManager 分片上传管理器
 type SliceUploadManager struct {
-	cache sync.Map // TaskID -> *SliceUploadSession
+	sessionG singleflight.Group[*SliceUploadSession]
+	cache    sync.Map // TaskID -> *SliceUploadSession
 }
 
 // SliceUploadSession 分片上传会话
@@ -112,7 +114,7 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 		log.Error(err)
 		return nil, errors.WithStack(err)
 	}
-	user, _ := ctx.Value(conf.UserKey).(*model.User)
+	user := ctx.Value(conf.UserKey).(*model.User)
 
 	// 生成唯一的TaskID
 	taskID := uuid.New().String()
@@ -130,9 +132,7 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 		Overwrite:    req.Overwrite,
 		ActualPath:   actualPath,
 		AsTask:       req.AsTask,
-	}
-	if user != nil {
-		createsu.UserID = user.ID
+		UserID:       user.ID,
 	}
 	log.Infof("storage mount path %s", storage.GetStorage().MountPath)
 
@@ -185,50 +185,26 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 
 // getOrLoadSession 获取或加载会话，提高代码复用性
 func (m *SliceUploadManager) getOrLoadSession(taskID string) (*SliceUploadSession, error) {
-	sa, loaded := m.cache.LoadOrStore(taskID, (*SliceUploadSession)(nil))
-	if !loaded {
+	session, err, _ := m.sessionG.Do(taskID, func() (*SliceUploadSession, error) {
+		if s, ok := m.cache.Load(taskID); ok {
+			return s.(*SliceUploadSession), nil
+		}
 		// 首次加载，需要从数据库获取
 		su, err := db.GetSliceUploadByTaskID(taskID)
 		if err != nil {
-			m.cache.Delete(taskID) // 清理无效的 key
 			return nil, errors.WithMessagef(err, "failed get slice upload [%s]", taskID)
 		}
-		session := &SliceUploadSession{
+		s := &SliceUploadSession{
 			SliceUpload: su,
 		}
-		m.cache.Store(taskID, session)
-		return session, nil
-	}
-
-	// 缓存中存在，但可能是nil值，需要检查
-	if sa == nil {
-		// 说明之前存储了nil，需要重新从数据库加载
-		su, err := db.GetSliceUploadByTaskID(taskID)
-		if err != nil {
-			m.cache.Delete(taskID)
-			return nil, errors.WithMessagef(err, "failed get slice upload [%s]", taskID)
-		}
-		session := &SliceUploadSession{
-			SliceUpload: su,
-		}
-		m.cache.Store(taskID, session)
-		return session, nil
-	}
-
-	session := sa.(*SliceUploadSession)
-	// 刷新数据库状态以确保数据一致性
-	if freshSu, err := db.GetSliceUploadByTaskID(taskID); err == nil {
-		session.mutex.Lock()
-		session.SliceUpload = freshSu
-		session.mutex.Unlock()
-	}
-	return session, nil
+		m.cache.Store(taskID, s)
+		return s, nil
+	})
+	return session, err
 }
 
 // UploadSlice 流式上传分片 - 支持流式上传，避免表单上传的内存占用
 func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadSliceReq, reader io.Reader) error {
-	var err error
-
 	session, err := m.getOrLoadSession(req.TaskID)
 	if err != nil {
 		log.Errorf("failed to get session: %+v", err)
@@ -283,40 +259,7 @@ func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Dri
 	// 根据存储类型处理分片上传
 	switch s := storage.(type) {
 	case driver.ISliceUpload:
-		log.Info("SliceUpload support")
-		// 对于支持原生分片上传的驱动，我们需要将流数据缓存到临时文件中
-		// 以支持重试和断点续传场景
-		if err := session.ensureTmpFile(); err != nil {
-			log.Error("ensureTmpFile error for native slice upload", req, err)
-			return err
-		}
-
-		// 将流数据写入临时文件的指定位置
-		sw := &sliceWriter{
-			file:   session.tmpFile,
-			offset: int64(req.SliceNum) * int64(session.SliceSize),
-		}
-		writtenBytes, err := utils.CopyWithBuffer(sw, reader)
-		if err != nil {
-			log.Error("Copy to temp file error for native slice upload", req, err)
-			return err
-		}
-		log.Debugf("Written %d bytes to temp file for slice %d", writtenBytes, req.SliceNum)
-
-		// 从临时文件读取数据进行上传
-		sliceSize := session.SliceSize
-		if req.SliceNum == session.SliceCnt-1 {
-			// 最后一个分片，计算实际大小
-			sliceSize = session.Size - int64(req.SliceNum)*int64(session.SliceSize)
-		}
-
-		sliceReader := &sliceReader{
-			file:   session.tmpFile,
-			offset: int64(req.SliceNum) * int64(session.SliceSize),
-			size:   sliceSize,
-		}
-
-		if err := s.SliceUpload(ctx, session.SliceUpload, req.SliceNum, sliceReader); err != nil {
+		if err := s.SliceUpload(ctx, session.SliceUpload, req.SliceNum, reader); err != nil {
 			log.Error("SliceUpload error", req, err)
 			return err
 		}
@@ -576,56 +519,6 @@ func (sw *sliceWriter) Write(p []byte) (int, error) {
 	n, err := sw.file.WriteAt(p, sw.offset)
 	sw.offset += int64(n)
 	return n, err
-}
-
-// sliceReader 用于从临时文件中读取指定分片的数据，支持断点续传
-type sliceReader struct {
-	file     *os.File
-	offset   int64
-	size     int64
-	position int64 // 当前读取位置（相对于分片开始）
-}
-
-// Read implements io.Reader interface
-func (sr *sliceReader) Read(p []byte) (int, error) {
-	if sr.position >= sr.size {
-		return 0, io.EOF
-	}
-
-	// 计算实际可读取的字节数
-	remaining := sr.size - sr.position
-	if int64(len(p)) > remaining {
-		p = p[:remaining]
-	}
-
-	n, err := sr.file.ReadAt(p, sr.offset+sr.position)
-	sr.position += int64(n)
-	return n, err
-}
-
-// Seek implements io.Seeker interface，支持重试场景
-func (sr *sliceReader) Seek(offset int64, whence int) (int64, error) {
-	var newPos int64
-	switch whence {
-	case io.SeekStart:
-		newPos = offset
-	case io.SeekCurrent:
-		newPos = sr.position + offset
-	case io.SeekEnd:
-		newPos = sr.size + offset
-	default:
-		return 0, fmt.Errorf("invalid whence value: %d", whence)
-	}
-
-	if newPos < 0 {
-		return 0, fmt.Errorf("negative position: %d", newPos)
-	}
-	if newPos > sr.size {
-		newPos = sr.size
-	}
-
-	sr.position = newPos
-	return newPos, nil
 }
 
 // recoverIncompleteUploads 恢复重启后未完成的上传任务
