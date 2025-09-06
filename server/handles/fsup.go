@@ -237,7 +237,7 @@ func FsPreup(c *gin.Context) {
 		common.ErrorResp(c, fmt.Errorf("invalid request body: %w", err), 400)
 		return
 	}
-	
+
 	// 基本参数验证
 	if req.Name == "" {
 		common.ErrorResp(c, fmt.Errorf("file name is required"), 400)
@@ -247,9 +247,15 @@ func FsPreup(c *gin.Context) {
 		common.ErrorResp(c, fmt.Errorf("file size must be greater than 0"), 400)
 		return
 	}
-	
+
 	storage := c.Request.Context().Value(conf.StorageKey).(driver.Driver)
 	path := c.Request.Context().Value(conf.PathKey).(string)
+	if !req.Overwrite {
+		if res, _ := fs.Get(c.Request.Context(), path, &fs.GetArgs{NoLog: true}); res != nil {
+			common.ErrorStrResp(c, "file exists", 403)
+			return
+		}
+	}
 
 	res, err := fs.Preup(c.Request.Context(), storage, path, req)
 	if err != nil {
@@ -261,50 +267,56 @@ func FsPreup(c *gin.Context) {
 
 // FsUpSlice 流式上传分片 - 使用PUT方法进行流式上传，避免表单上传的内存占用
 func FsUpSlice(c *gin.Context) {
+	defer func() {
+		if n, _ := io.ReadFull(c.Request.Body, []byte{0}); n == 1 {
+			_, _ = utils.CopyWithBuffer(io.Discard, c.Request.Body)
+		}
+		_ = c.Request.Body.Close()
+	}()
 	// 从HTTP头获取参数
 	taskID := c.GetHeader("X-Task-ID")
 	if taskID == "" {
 		common.ErrorResp(c, fmt.Errorf("X-Task-ID header is required"), 400)
 		return
 	}
-	
+
 	sliceNumStr := c.GetHeader("X-Slice-Num")
 	if sliceNumStr == "" {
 		common.ErrorResp(c, fmt.Errorf("X-Slice-Num header is required"), 400)
 		return
 	}
-	
+
 	sliceNum, err := strconv.ParseUint(sliceNumStr, 10, 32)
 	if err != nil {
 		common.ErrorResp(c, fmt.Errorf("invalid X-Slice-Num: %w", err), 400)
 		return
 	}
-	
+
 	sliceHash := c.GetHeader("X-Slice-Hash")
-	
+
 	// 构建请求对象
 	req := &reqres.UploadSliceReq{
 		TaskID:    taskID,
 		SliceHash: sliceHash,
 		SliceNum:  uint(sliceNum),
 	}
-	
+
 	// 获取请求体作为流
 	reader := c.Request.Body
 	if reader == nil {
 		common.ErrorResp(c, fmt.Errorf("request body is required"), 400)
 		return
 	}
-	
+
 	storage := c.Request.Context().Value(conf.StorageKey).(driver.Driver)
-	
+
 	// 调用流式上传分片函数
 	err = fs.UploadSlice(c.Request.Context(), storage, req, reader)
 	if err != nil {
 		common.ErrorResp(c, fmt.Errorf("upload slice failed: %w", err), 500)
 		return
 	}
-	
+
 	common.SuccessResp(c)
 }
 
@@ -316,12 +328,12 @@ func FsUpSliceComplete(c *gin.Context) {
 		common.ErrorResp(c, fmt.Errorf("invalid request body: %w", err), 400)
 		return
 	}
-	
+
 	if req.TaskID == "" {
 		common.ErrorResp(c, fmt.Errorf("task_id is required"), 400)
 		return
 	}
-	
+
 	storage := c.Request.Context().Value(conf.StorageKey).(driver.Driver)
 	rsp, err := fs.SliceUpComplete(c.Request.Context(), storage, req.TaskID)
 	if err != nil {
