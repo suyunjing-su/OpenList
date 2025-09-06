@@ -38,13 +38,6 @@ type SliceUploadSession struct {
 	mutex   sync.Mutex
 }
 
-// NewSliceUploadManager 创建分片上传管理器
-func NewSliceUploadManager() *SliceUploadManager {
-	manager := &SliceUploadManager{}
-	go manager.cleanupIncompleteUploads()
-	return manager
-}
-
 // CreateSession 创建新的上传会话
 func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.Driver, actualPath string, req *reqres.PreupReq) (*reqres.PreupResp, error) {
 	srcobj, err := op.Get(ctx, storage, actualPath)
@@ -190,11 +183,11 @@ func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Dri
 	switch s := storage.(type) {
 	case driver.ISliceUpload:
 		if err := s.SliceUpload(ctx, session.SliceUpload, req.SliceNum, reader); err != nil {
-			log.Errorf("Native slice upload failed - TaskID: %s, SliceNum: %d, Error: %v", 
+			log.Errorf("Native slice upload failed - TaskID: %s, SliceNum: %d, Error: %v",
 				req.TaskID, req.SliceNum, err)
 			return errors.WithMessagef(err, "slice %d upload failed", req.SliceNum)
 		}
-		log.Debugf("Native slice upload success - TaskID: %s, SliceNum: %d", 
+		log.Debugf("Native slice upload success - TaskID: %s, SliceNum: %d",
 			req.TaskID, req.SliceNum)
 
 	default:
@@ -410,19 +403,11 @@ func (s *SliceUploadSession) cleanup() {
 
 // 全局管理器实例使用延迟初始化
 var globalSliceManager *SliceUploadManager
-var globalSliceManagerOnce sync.Once
 
 func InitSliceUploadManager() {
 	log.Info("Initializing slice upload manager...")
-	getGlobalSliceManager()
-}
-
-// getGlobalSliceManager 获取全局分片上传管理器（延迟初始化）
-func getGlobalSliceManager() *SliceUploadManager {
-	globalSliceManagerOnce.Do(func() {
-		globalSliceManager = NewSliceUploadManager()
-	})
-	return globalSliceManager
+	globalSliceManager = &SliceUploadManager{}
+	go globalSliceManager.cleanupIncompleteUploads()
 }
 
 // sliceWriter 分片写入器 - 保持原始实现
