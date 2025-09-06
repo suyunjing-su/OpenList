@@ -70,23 +70,19 @@ func UpdateSliceUploadWithTx(su *tables.SliceUpload) error {
 // UpdateSliceStatusAtomic 原子性地更新分片状态
 func UpdateSliceStatusAtomic(taskID string, sliceNum int, status []byte) error {
 	return errors.WithStack(db.Transaction(func(tx *gorm.DB) error {
-		// 先读取当前状态
 		var su tables.SliceUpload
 		if err := tx.Where("task_id = ?", taskID).First(&su).Error; err != nil {
 			return err
 		}
 
-		// 更新分片状态
 		tables.SetSliceUploaded(su.SliceUploadStatus, sliceNum)
 
-		// 保存更新
 		return tx.Save(&su).Error
 	}))
 }
 
 // CleanupOrphanedSliceUploads 清理孤儿分片上传记录（启动时调用）
 func CleanupOrphanedSliceUploads() error {
-	// 清理超过24小时的未完成任务
 	cutoff := time.Now().Add(-24 * time.Hour)
 
 	var orphanedTasks []tables.SliceUpload
@@ -99,7 +95,6 @@ func CleanupOrphanedSliceUploads() error {
 
 	cleanedCount := 0
 	for _, task := range orphanedTasks {
-		// 清理临时文件
 		if task.TmpFile != "" {
 			if err := os.Remove(task.TmpFile); err != nil && !os.IsNotExist(err) {
 				log.Warnf("Failed to remove orphaned tmp file %s: %v", task.TmpFile, err)
@@ -108,7 +103,6 @@ func CleanupOrphanedSliceUploads() error {
 			}
 		}
 
-		// 删除数据库记录
 		if err := db.Delete(&task).Error; err != nil {
 			log.Errorf("Failed to delete orphaned slice upload task %s: %v", task.TaskID, err)
 		} else {
@@ -120,22 +114,18 @@ func CleanupOrphanedSliceUploads() error {
 		log.Infof("Cleaned up %d orphaned slice upload tasks", cleanedCount)
 	}
 
-	// 额外清理：扫描临时目录中的孤儿文件
 	return cleanupOrphanedTempFiles()
 }
 
 // cleanupOrphanedTempFiles 清理临时目录中的孤儿文件
 func cleanupOrphanedTempFiles() error {
-	// 获取临时目录路径，使用共享的tempdir包
 	tempDir := conf.GetPersistentTempDir()
 
-	// 检查临时目录是否存在
 	if _, err := os.Stat(tempDir); os.IsNotExist(err) {
 		log.Debugf("Temp directory does not exist: %s", tempDir)
 		return nil
 	}
 
-	// 获取所有活跃的分片上传任务的临时文件列表
 	var activeTasks []tables.SliceUpload
 	if err := db.Where("tmp_file IS NOT NULL AND tmp_file != '' AND status IN (?, ?)",
 		tables.SliceUploadStatusWaiting,
@@ -143,7 +133,6 @@ func cleanupOrphanedTempFiles() error {
 		return errors.WithStack(err)
 	}
 
-	// 构建活跃文件的映射表
 	activeFiles := make(map[string]bool)
 	for _, task := range activeTasks {
 		if task.TmpFile != "" {
@@ -152,43 +141,36 @@ func cleanupOrphanedTempFiles() error {
 	}
 
 	cleanedCount := 0
-	cutoff := time.Now().Add(-24 * time.Hour) // 只清理超过24小时的文件
+	cutoff := time.Now().Add(-24 * time.Hour)
 
-	// 遍历临时目录
 	err := filepath.WalkDir(tempDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			log.Warnf("Failed to access path %s: %v", path, err)
 			return nil // 继续处理其他文件
 		}
 
-		// 跳过目录
 		if d.IsDir() {
 			return nil
 		}
 
-		// 只处理分片上传临时文件（以slice_upload_开头）
 		if !strings.HasPrefix(d.Name(), "slice_upload_") {
 			return nil
 		}
 
-		// 检查文件是否在活跃任务列表中
 		if activeFiles[path] {
 			return nil // 文件仍在使用中，跳过
 		}
 
-		// 检查文件修改时间
 		info, err := d.Info()
 		if err != nil {
 			log.Warnf("Failed to get file info for %s: %v", path, err)
 			return nil
 		}
 
-		// 只清理超过24小时的文件
 		if info.ModTime().After(cutoff) {
 			return nil
 		}
 
-		// 删除孤儿文件
 		if err := os.Remove(path); err != nil {
 			log.Warnf("Failed to remove orphaned temp file %s: %v", path, err)
 		} else {

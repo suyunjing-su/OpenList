@@ -54,10 +54,8 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 	}
 	user := ctx.Value(conf.UserKey).(*model.User)
 
-	// 生成唯一的TaskID
 	taskID := uuid.New().String()
 
-	//创建新的上传任务
 	createsu := &tables.SliceUpload{
 		TaskID:       taskID,
 		DstPath:      req.Path,
@@ -121,13 +119,11 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 	}, nil
 }
 
-// getOrLoadSession 获取或加载会话，提高代码复用性
 func (m *SliceUploadManager) getOrLoadSession(taskID string) (*SliceUploadSession, error) {
 	session, err, _ := m.sessionG.Do(taskID, func() (*SliceUploadSession, error) {
 		if s, ok := m.cache.Load(taskID); ok {
 			return s.(*SliceUploadSession), nil
 		}
-		// 首次加载，需要从数据库获取
 		su, err := db.GetSliceUploadByTaskID(taskID)
 		if err != nil {
 			return nil, errors.WithMessagef(err, "failed get slice upload [%s]", taskID)
@@ -141,7 +137,7 @@ func (m *SliceUploadManager) getOrLoadSession(taskID string) (*SliceUploadSessio
 	return session, err
 }
 
-// UploadSlice 流式上传分片 - 支持流式上传，避免表单上传的内存占用
+// UploadSlice 流式上传分片
 func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadSliceReq, reader io.Reader) error {
 	session, err := m.getOrLoadSession(req.TaskID)
 	if err != nil {
@@ -149,13 +145,12 @@ func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Dri
 		return err
 	}
 
-	// 确保并发安全的错误处理
 	defer func() {
 		if err != nil {
 			session.mutex.Lock()
 			session.Status = tables.SliceUploadStatusFailed
 			session.Message = err.Error()
-			updateData := *session.SliceUpload // 复制数据避免锁持有时间过长
+			updateData := *session.SliceUpload
 			session.mutex.Unlock()
 
 			if updateErr := db.UpdateSliceUpload(&updateData); updateErr != nil {
@@ -166,7 +161,6 @@ func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Dri
 
 	// 使用锁保护状态检查
 	session.mutex.Lock()
-	// 检查分片是否已上传过
 	if tables.IsSliceUploaded(session.SliceUploadStatus, int(req.SliceNum)) {
 		session.mutex.Unlock()
 		log.Warnf("slice already uploaded,req:%+v", req)
@@ -178,8 +172,7 @@ func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Dri
 	if req.SliceHash != "" {
 		session.mutex.Lock()
 
-		// 验证分片hash值
-		if req.SliceNum == 0 { // 第一个分片，slicehash是所有的分片hash
+		if req.SliceNum == 0 {
 			hs := strings.Split(req.SliceHash, ",")
 			if len(hs) != int(session.SliceCnt) {
 				session.mutex.Unlock()
@@ -187,18 +180,15 @@ func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Dri
 				log.Error("slice hash count mismatch", req, err)
 				return err
 			}
-			session.SliceHash = req.SliceHash // 存储完整的hash字符串
+			session.SliceHash = req.SliceHash
 		} else {
-			// 非第0个分片，不覆盖 SliceHash，保持完整的hash列表
 			log.Debugf("Slice %d hash: %s (keeping complete hash list)", req.SliceNum, req.SliceHash)
 		}
 		session.mutex.Unlock()
 	}
 
-	// 根据存储类型处理分片上传
 	switch s := storage.(type) {
 	case driver.ISliceUpload:
-		// Native slice upload: directly pass stream data, let frontend handle retry and recovery
 		if err := s.SliceUpload(ctx, session.SliceUpload, req.SliceNum, reader); err != nil {
 			log.Errorf("Native slice upload failed - TaskID: %s, SliceNum: %d, Error: %v", 
 				req.TaskID, req.SliceNum, err)
@@ -207,13 +197,12 @@ func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Dri
 		log.Debugf("Native slice upload success - TaskID: %s, SliceNum: %d", 
 			req.TaskID, req.SliceNum)
 
-	default: //其他网盘先缓存到本地
+	default:
 		if err := session.ensureTmpFile(); err != nil {
 			log.Error("ensureTmpFile error", req, err)
 			return err
 		}
 
-		// 流式复制，减少内存占用
 		sw := &sliceWriter{
 			file:   session.tmpFile,
 			offset: int64(req.SliceNum) * int64(session.SliceSize),
@@ -225,10 +214,9 @@ func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Dri
 		}
 	}
 
-	// 原子性更新分片状态
 	session.mutex.Lock()
 	tables.SetSliceUploaded(session.SliceUploadStatus, int(req.SliceNum))
-	updateData := *session.SliceUpload // 复制数据
+	updateData := *session.SliceUpload
 	session.mutex.Unlock()
 
 	err = db.UpdateSliceUpload(&updateData)
@@ -263,7 +251,6 @@ func (m *SliceUploadManager) CompleteUpload(ctx context.Context, storage driver.
 	}
 
 	defer func() {
-		// 确保资源清理和缓存删除
 		session.cleanup()
 		m.cache.Delete(session.TaskID)
 
@@ -278,7 +265,6 @@ func (m *SliceUploadManager) CompleteUpload(ctx context.Context, storage driver.
 				log.Errorf("Failed to update slice upload status: %v", updateErr)
 			}
 		} else {
-			// 上传成功后从数据库中删除记录，允许重复上传
 			if deleteErr := db.DeleteSliceUploadByTaskID(session.TaskID); deleteErr != nil {
 				log.Errorf("Failed to delete slice upload record: %v", deleteErr)
 			}
@@ -293,14 +279,12 @@ func (m *SliceUploadManager) CompleteUpload(ctx context.Context, storage driver.
 			return nil, err
 		}
 
-		// 原生分片上传成功，直接返回，defer中会删除数据库记录
 		return &reqres.UploadSliceCompleteResp{
 			Complete: 1,
 			TaskID:   session.TaskID,
 		}, nil
 
 	default:
-		// 其他网盘客户端上传到本地后，上传到网盘，使用任务处理
 		session.mutex.Lock()
 		tmpFile := session.tmpFile
 		session.mutex.Unlock()
@@ -330,7 +314,6 @@ func (m *SliceUploadManager) CompleteUpload(ctx context.Context, storage driver.
 
 		if session.AsTask {
 			file.SetTmpFile(tmpFile)
-			// 防止defer中清理文件
 			session.mutex.Lock()
 			session.tmpFile = nil
 			session.TmpFile = ""
@@ -360,15 +343,12 @@ func (m *SliceUploadManager) CompleteUpload(ctx context.Context, storage driver.
 	}
 }
 
-// ensureTmpFile 确保临时文件存在且正确初始化，线程安全 - 使用持久化目录
 func (s *SliceUploadSession) ensureTmpFile() error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
 	if s.TmpFile == "" {
-		// 使用TaskID作为文件名的一部分，确保唯一性和可识别性
 		filename := fmt.Sprintf("slice_upload_%s_%s", s.TaskID, s.Name)
-		// 清理文件名中的特殊字符
 		filename = strings.ReplaceAll(filename, "/", "_")
 		filename = strings.ReplaceAll(filename, "\\", "_")
 		filename = strings.ReplaceAll(filename, ":", "_")
@@ -392,7 +372,6 @@ func (s *SliceUploadSession) ensureTmpFile() error {
 		// 更新数据库中的临时文件路径
 		if updateErr := db.UpdateSliceUpload(s.SliceUpload); updateErr != nil {
 			log.Errorf("Failed to update temp file path in database: %v", updateErr)
-			// 不返回错误，因为文件已经创建成功，只是数据库更新失败
 		}
 
 		log.Debugf("Created persistent temp file: %s", tmpPath)
@@ -410,7 +389,6 @@ func (s *SliceUploadSession) ensureTmpFile() error {
 	return nil
 }
 
-// cleanup 清理资源，线程安全 - 保持原始实现
 func (s *SliceUploadSession) cleanup() {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()

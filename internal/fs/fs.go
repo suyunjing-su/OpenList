@@ -190,19 +190,14 @@ func PutURL(ctx context.Context, path, dstName, urlStr string) error {
 	return op.PutURL(ctx, storage, dstDirActualPath, dstName, urlStr)
 }
 
-/// 分片上传功能--------------------------------------------------------------------
-
-// Preup 预上传 - 使用新的管理器重构
 func Preup(c context.Context, s driver.Driver, actualPath string, req *reqres.PreupReq) (*reqres.PreupResp, error) {
 	return getGlobalSliceManager().CreateSession(c, s, actualPath, req)
 }
 
-// UploadSlice 流式上传切片 - 使用新的管理器重构，支持流式上传
 func UploadSlice(ctx context.Context, storage driver.Driver, req *reqres.UploadSliceReq, reader io.Reader) error {
 	return getGlobalSliceManager().UploadSlice(ctx, storage, req, reader)
 }
 
-// SliceUpComplete 完成分片上传 - 使用新的管理器重构
 func SliceUpComplete(ctx context.Context, storage driver.Driver, taskID string) (*reqres.UploadSliceCompleteResp, error) {
 	return getGlobalSliceManager().CompleteUpload(ctx, storage, taskID)
 }

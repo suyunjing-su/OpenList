@@ -238,7 +238,6 @@ func FsPreup(c *gin.Context) {
 		return
 	}
 
-	// 基本参数验证
 	if req.Name == "" {
 		common.ErrorResp(c, fmt.Errorf("file name is required"), 400)
 		return
@@ -274,7 +273,6 @@ func FsUpSlice(c *gin.Context) {
 		}
 		_ = c.Request.Body.Close()
 	}()
-	// 从HTTP头获取参数
 	taskID := c.GetHeader("X-Task-ID")
 	if taskID == "" {
 		common.ErrorResp(c, fmt.Errorf("X-Task-ID header is required"), 400)
@@ -295,14 +293,12 @@ func FsUpSlice(c *gin.Context) {
 
 	sliceHash := c.GetHeader("X-Slice-Hash")
 
-	// 构建请求对象
 	req := &reqres.UploadSliceReq{
 		TaskID:    taskID,
 		SliceHash: sliceHash,
 		SliceNum:  uint(sliceNum),
 	}
 
-	// 获取请求体作为流
 	reader := c.Request.Body
 	if reader == nil {
 		common.ErrorResp(c, fmt.Errorf("request body is required"), 400)
@@ -311,7 +307,6 @@ func FsUpSlice(c *gin.Context) {
 
 	storage := c.Request.Context().Value(conf.StorageKey).(driver.Driver)
 
-	// 调用流式上传分片函数
 	err = fs.UploadSlice(c.Request.Context(), storage, req, reader)
 	if err != nil {
 		common.ErrorResp(c, fmt.Errorf("upload slice failed: %w", err), 500)
