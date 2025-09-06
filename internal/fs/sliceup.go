@@ -434,6 +434,11 @@ func (s *SliceUploadSession) cleanup() {
 var globalSliceManager *SliceUploadManager
 var globalSliceManagerOnce sync.Once
 
+func InitSliceUploadManager() {
+	log.Info("Initializing slice upload manager...")
+	getGlobalSliceManager()
+}
+
 // getGlobalSliceManager 获取全局分片上传管理器（延迟初始化）
 func getGlobalSliceManager() *SliceUploadManager {
 	globalSliceManagerOnce.Do(func() {
@@ -466,36 +471,33 @@ func (m *SliceUploadManager) cleanupIncompleteUploads() {
 		}
 	}()
 
-	// 等待一段时间，确保系统完全启动
 	time.Sleep(10 * time.Second)
 
 	log.Info("Starting cleanup of incomplete slice uploads after restart...")
 
-	// 查询所有未完成的上传任务
 	incompleteUploads, err := db.GetIncompleteSliceUploads()
 	if err != nil {
 		log.Errorf("Failed to get incomplete slice uploads: %v", err)
-		return
-	}
-
-	if len(incompleteUploads) == 0 {
-		log.Info("No incomplete slice uploads found")
-		return
-	}
-
-	log.Infof("Found %d incomplete slice uploads, starting cleanup...", len(incompleteUploads))
-
-	cleanedCount := 0
-	for _, upload := range incompleteUploads {
-		if m.cleanupSingleUpload(upload) {
-			cleanedCount++
+	} else {
+		if len(incompleteUploads) == 0 {
+			log.Info("No incomplete slice uploads found in database")
+		} else {
+			log.Infof("Found %d incomplete slice uploads in database, starting cleanup...", len(incompleteUploads))
+			cleanedCount := 0
+			for _, upload := range incompleteUploads {
+				if m.cleanupSingleUpload(upload) {
+					cleanedCount++
+				}
+			}
+			log.Infof("Database cleanup completed, cleaned up %d tasks", cleanedCount)
 		}
 	}
 
-	log.Infof("Slice upload cleanup completed, cleaned up %d tasks", cleanedCount)
+	m.cleanupOrphanedTempFiles()
+
+	log.Info("Slice upload cleanup completed")
 }
 
-// cleanupSingleUpload 清理单个上传任务
 func (m *SliceUploadManager) cleanupSingleUpload(upload *tables.SliceUpload) bool {
 	defer func() {
 		if r := recover(); r != nil {
@@ -505,7 +507,6 @@ func (m *SliceUploadManager) cleanupSingleUpload(upload *tables.SliceUpload) boo
 
 	log.Infof("Cleaning up upload task: %s, status: %s", upload.TaskID, upload.Status)
 
-	// 清理临时文件
 	if upload.TmpFile != "" {
 		if err := os.Remove(upload.TmpFile); err != nil && !os.IsNotExist(err) {
 			log.Warnf("Failed to remove temp file %s for task %s: %v", upload.TmpFile, upload.TaskID, err)
@@ -514,7 +515,6 @@ func (m *SliceUploadManager) cleanupSingleUpload(upload *tables.SliceUpload) boo
 		}
 	}
 
-	// 从数据库中删除任务记录
 	if err := db.DeleteSliceUploadByTaskID(upload.TaskID); err != nil {
 		log.Errorf("Failed to delete slice upload task %s: %v", upload.TaskID, err)
 		return false
@@ -522,4 +522,62 @@ func (m *SliceUploadManager) cleanupSingleUpload(upload *tables.SliceUpload) boo
 
 	log.Infof("Successfully cleaned up task: %s", upload.TaskID)
 	return true
+}
+
+func (m *SliceUploadManager) cleanupOrphanedTempFiles() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("Panic in cleanupOrphanedTempFiles: %v", r)
+		}
+	}()
+
+	tempDir := conf.GetPersistentTempDir()
+	if tempDir == "" {
+		log.Warn("Persistent temp directory not configured, skipping orphaned file cleanup")
+		return
+	}
+
+	log.Infof("Cleaning up orphaned temp files in: %s", tempDir)
+
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		log.Errorf("Failed to read temp directory %s: %v", tempDir, err)
+		return
+	}
+
+	orphanedCount := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		fileName := entry.Name()
+		if !strings.HasPrefix(fileName, "slice_upload_") {
+			continue
+		}
+
+		filePath := filepath.Join(tempDir, fileName)
+		fileInfo, err := entry.Info()
+		if err != nil {
+			log.Warnf("Failed to get file info for %s: %v", filePath, err)
+			continue
+		}
+
+		if time.Since(fileInfo.ModTime()) < 24*time.Hour {
+			continue
+		}
+
+		if err := os.Remove(filePath); err != nil {
+			log.Warnf("Failed to remove orphaned temp file %s: %v", filePath, err)
+		} else {
+			log.Debugf("Removed orphaned temp file: %s", filePath)
+			orphanedCount++
+		}
+	}
+
+	if orphanedCount > 0 {
+		log.Infof("Cleaned up %d orphaned temp files", orphanedCount)
+	} else {
+		log.Info("No orphaned temp files found")
+	}
 }
