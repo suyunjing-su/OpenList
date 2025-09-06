@@ -54,7 +54,10 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 		"dst_path": req.Path,
 		"name":     req.Name,
 		"size":     req.Size,
-		"status":   tables.SliceUploadStatusUploading, // 只查找正在进行中的任务
+		"status": []int{
+			tables.SliceUploadStatusWaiting,    // 等待状态（重启后恢复）
+			tables.SliceUploadStatusUploading,  // 上传中状态
+		},
 	}
 	if req.Hash.Md5 != "" {
 		wh["hash_md5"] = req.Hash.Md5
@@ -73,7 +76,7 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 	}
 
 	if su.TaskID != "" { // 找到未完成的上传任务，支持断点续传
-		// 验证临时文件是否仍然存在（重启后可能被清理）
+		// 验证临时文件是否仍然存在（仅对非原生分片上传）
 		if su.TmpFile != "" {
 			if _, err := os.Stat(su.TmpFile); os.IsNotExist(err) {
 				// 临时文件丢失，清理数据库记录，重新开始
@@ -83,11 +86,12 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 				}
 				// 继续创建新任务
 			} else {
-				// 临时文件存在，可以继续断点续传
+				// Temporary file exists, can continue resumable upload (traditional upload mode)
 				session := &SliceUploadSession{SliceUpload: su}
 				m.cache.Store(su.TaskID, session)
-				log.Infof("Resuming slice upload after restart: %s, completed slices: %d/%d",
-					su.TaskID, tables.CountUploadedSlices(su.SliceUploadStatus), su.SliceCnt)
+				completedSlices := tables.CountUploadedSlices(su.SliceUploadStatus)
+				log.Infof("Resuming file-based slice upload: %s, completed: %d/%d",
+					su.TaskID, completedSlices, su.SliceCnt)
 				return &reqres.PreupResp{
 					TaskID:            su.TaskID,
 					SliceSize:         su.SliceSize,
@@ -96,10 +100,12 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 				}, nil
 			}
 		} else {
-			// 原生分片上传（如123open/baidu），无需临时文件
+			// Native slice upload, relying on frontend intelligent retry and state sync
 			session := &SliceUploadSession{SliceUpload: su}
 			m.cache.Store(su.TaskID, session)
-			log.Infof("Resuming native slice upload after restart: %s", su.TaskID)
+			completedSlices := tables.CountUploadedSlices(su.SliceUploadStatus)
+			log.Infof("Resuming native slice upload: %s, completed: %d/%d, relying on frontend sync",
+				su.TaskID, completedSlices, su.SliceCnt)
 			return &reqres.PreupResp{
 				TaskID:            su.TaskID,
 				SliceSize:         su.SliceSize,
@@ -259,10 +265,14 @@ func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Dri
 	// 根据存储类型处理分片上传
 	switch s := storage.(type) {
 	case driver.ISliceUpload:
+		// Native slice upload: directly pass stream data, let frontend handle retry and recovery
 		if err := s.SliceUpload(ctx, session.SliceUpload, req.SliceNum, reader); err != nil {
-			log.Error("SliceUpload error", req, err)
-			return err
+			log.Errorf("Native slice upload failed - TaskID: %s, SliceNum: %d, Error: %v", 
+				req.TaskID, req.SliceNum, err)
+			return errors.WithMessagef(err, "slice %d upload failed", req.SliceNum)
 		}
+		log.Debugf("Native slice upload success - TaskID: %s, SliceNum: %d", 
+			req.TaskID, req.SliceNum)
 
 	default: //其他网盘先缓存到本地
 		if err := session.ensureTmpFile(); err != nil {
