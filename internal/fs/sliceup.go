@@ -19,17 +19,15 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
-	"github.com/OpenListTeam/OpenList/v4/pkg/tempdir"
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
-	"gorm.io/gorm"
 	log "github.com/sirupsen/logrus"
+	"gorm.io/gorm"
 )
 
 // SliceUploadManager 分片上传管理器
 type SliceUploadManager struct {
-	cache    sync.Map         // TaskID -> *SliceUploadSession
-	tempDir  string          // 临时文件目录
+	cache sync.Map // TaskID -> *SliceUploadSession
 }
 
 // SliceUploadSession 分片上传会话
@@ -41,14 +39,9 @@ type SliceUploadSession struct {
 
 // NewSliceUploadManager 创建分片上传管理器
 func NewSliceUploadManager() *SliceUploadManager {
-	tempDirPath := tempdir.GetPersistentTempDir()
-	manager := &SliceUploadManager{
-		tempDir: tempDirPath,
-	}
-	
+	manager := &SliceUploadManager{}
 	// 启动时恢复未完成的上传任务
 	go manager.recoverIncompleteUploads()
-	
 	return manager
 }
 
@@ -77,7 +70,7 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 		return nil, errors.WithStack(err)
 	}
 
-	if su.ID != 0 { // 找到未完成的上传任务，支持断点续传
+	if su.TaskID != "" { // 找到未完成的上传任务，支持断点续传
 		// 验证临时文件是否仍然存在（重启后可能被清理）
 		if su.TmpFile != "" {
 			if _, err := os.Stat(su.TmpFile); os.IsNotExist(err) {
@@ -91,7 +84,7 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 				// 临时文件存在，可以继续断点续传
 				session := &SliceUploadSession{SliceUpload: su}
 				m.cache.Store(su.TaskID, session)
-				log.Infof("Resuming slice upload after restart: %s, completed slices: %d/%d", 
+				log.Infof("Resuming slice upload after restart: %s, completed slices: %d/%d",
 					su.TaskID, tables.CountUploadedSlices(su.SliceUploadStatus), su.SliceCnt)
 				return &reqres.PreupResp{
 					TaskID:            su.TaskID,
@@ -113,7 +106,7 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 			}, nil
 		}
 	}
-	
+
 	srcobj, err := op.Get(ctx, storage, actualPath)
 	if err != nil {
 		log.Error(err)
@@ -123,7 +116,7 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 
 	// 生成唯一的TaskID
 	taskID := uuid.New().String()
-	
+
 	//创建新的上传任务
 	createsu := &tables.SliceUpload{
 		TaskID:       taskID,
@@ -142,7 +135,7 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 		createsu.UserID = user.ID
 	}
 	log.Infof("storage mount path %s", storage.GetStorage().MountPath)
-	
+
 	switch st := storage.(type) {
 	case driver.IPreup:
 		log.Info("preup support")
@@ -167,7 +160,7 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 		log.Info("Preup not support")
 		createsu.SliceSize = 10 * utils.MB
 	}
-	
+
 	createsu.SliceCnt = uint((req.Size + createsu.SliceSize - 1) / createsu.SliceSize)
 	createsu.SliceUploadStatus = make([]byte, (createsu.SliceCnt+7)/8)
 	createsu.Status = tables.SliceUploadStatusWaiting // 设置初始状态
@@ -177,10 +170,10 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 		log.Error("CreateSliceUpload error", createsu, err)
 		return nil, errors.WithStack(err)
 	}
-	
+
 	session := &SliceUploadSession{SliceUpload: createsu}
 	m.cache.Store(taskID, session)
-	
+
 	return &reqres.PreupResp{
 		Reuse:             false,
 		SliceUploadStatus: createsu.SliceUploadStatus,
@@ -206,7 +199,7 @@ func (m *SliceUploadManager) getOrLoadSession(taskID string) (*SliceUploadSessio
 		m.cache.Store(taskID, session)
 		return session, nil
 	}
-	
+
 	// 缓存中存在，但可能是nil值，需要检查
 	if sa == nil {
 		// 说明之前存储了nil，需要重新从数据库加载
@@ -221,7 +214,7 @@ func (m *SliceUploadManager) getOrLoadSession(taskID string) (*SliceUploadSessio
 		m.cache.Store(taskID, session)
 		return session, nil
 	}
-	
+
 	session := sa.(*SliceUploadSession)
 	// 刷新数据库状态以确保数据一致性
 	if freshSu, err := db.GetSliceUploadByTaskID(taskID); err == nil {
@@ -241,7 +234,7 @@ func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Dri
 		log.Errorf("failed to get session: %+v", err)
 		return err
 	}
-	
+
 	// 确保并发安全的错误处理
 	defer func() {
 		if err != nil {
@@ -250,7 +243,7 @@ func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Dri
 			session.Message = err.Error()
 			updateData := *session.SliceUpload // 复制数据避免锁持有时间过长
 			session.mutex.Unlock()
-			
+
 			if updateErr := db.UpdateSliceUpload(&updateData); updateErr != nil {
 				log.Errorf("Failed to update slice upload status: %v", updateErr)
 			}
@@ -316,13 +309,13 @@ func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Dri
 			// 最后一个分片，计算实际大小
 			sliceSize = session.Size - int64(req.SliceNum)*int64(session.SliceSize)
 		}
-		
+
 		sliceReader := &sliceReader{
 			file:   session.tmpFile,
 			offset: int64(req.SliceNum) * int64(session.SliceSize),
 			size:   sliceSize,
 		}
-		
+
 		if err := s.SliceUpload(ctx, session.SliceUpload, req.SliceNum, sliceReader); err != nil {
 			log.Error("SliceUpload error", req, err)
 			return err
@@ -345,7 +338,7 @@ func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Dri
 			return err
 		}
 	}
-	
+
 	// 原子性更新分片状态
 	session.mutex.Lock()
 	tables.SetSliceUploaded(session.SliceUploadStatus, int(req.SliceNum))
@@ -369,13 +362,13 @@ func (m *SliceUploadManager) CompleteUpload(ctx context.Context, storage driver.
 		log.Errorf("failed to get session: %+v", err)
 		return nil, err
 	}
-	
+
 	// 检查是否所有分片都已上传
 	session.mutex.Lock()
 	allUploaded := tables.IsAllSliceUploaded(session.SliceUploadStatus, session.SliceCnt)
 	isPendingComplete := session.Status == tables.SliceUploadStatusPendingComplete
 	session.mutex.Unlock()
-	
+
 	if !allUploaded && !isPendingComplete {
 		return &reqres.UploadSliceCompleteResp{
 			Complete:          0,
@@ -393,14 +386,14 @@ func (m *SliceUploadManager) CompleteUpload(ctx context.Context, storage driver.
 		// 确保资源清理和缓存删除
 		session.cleanup()
 		m.cache.Delete(session.TaskID)
-		
+
 		if err != nil {
 			session.mutex.Lock()
 			session.Status = tables.SliceUploadStatusFailed
 			session.Message = err.Error()
 			updateData := *session.SliceUpload
 			session.mutex.Unlock()
-			
+
 			if updateErr := db.UpdateSliceUpload(&updateData); updateErr != nil {
 				log.Errorf("Failed to update slice upload status: %v", updateErr)
 			}
@@ -411,7 +404,7 @@ func (m *SliceUploadManager) CompleteUpload(ctx context.Context, storage driver.
 			}
 		}
 	}()
-	
+
 	switch s := storage.(type) {
 	case driver.IUploadSliceComplete:
 		err = s.UploadSliceComplete(ctx, session.SliceUpload)
@@ -419,7 +412,7 @@ func (m *SliceUploadManager) CompleteUpload(ctx context.Context, storage driver.
 			log.Error("UploadSliceComplete error", session.SliceUpload, err)
 			return nil, err
 		}
-		
+
 		// 原生分片上传成功，直接返回，defer中会删除数据库记录
 		return &reqres.UploadSliceCompleteResp{
 			Complete: 1,
@@ -431,13 +424,13 @@ func (m *SliceUploadManager) CompleteUpload(ctx context.Context, storage driver.
 		session.mutex.Lock()
 		tmpFile := session.tmpFile
 		session.mutex.Unlock()
-		
+
 		if tmpFile == nil {
 			err := fmt.Errorf("tmp file not found [%s]", taskID)
 			log.Error(err)
 			return nil, err
 		}
-		
+
 		var hashInfo utils.HashInfo
 		if session.HashMd5 != "" {
 			hashInfo = utils.NewHashInfo(utils.MD5, session.HashMd5)
@@ -454,7 +447,7 @@ func (m *SliceUploadManager) CompleteUpload(ctx context.Context, storage driver.
 			},
 		}
 		file.Mimetype = utils.GetMimeType(session.Name)
-		
+
 		if session.AsTask {
 			file.SetTmpFile(tmpFile)
 			// 防止defer中清理文件
@@ -462,7 +455,7 @@ func (m *SliceUploadManager) CompleteUpload(ctx context.Context, storage driver.
 			session.tmpFile = nil
 			session.TmpFile = ""
 			session.mutex.Unlock()
-			
+
 			_, err = putAsTask(ctx, session.DstPath, file)
 			if err != nil {
 				log.Error("putAsTask error", session.SliceUpload, err)
@@ -473,7 +466,7 @@ func (m *SliceUploadManager) CompleteUpload(ctx context.Context, storage driver.
 				TaskID:   session.TaskID,
 			}, nil
 		}
-		
+
 		file.Reader = tmpFile
 		err = op.Put(ctx, storage, session.ActualPath, file, nil)
 		if err != nil {
@@ -491,43 +484,41 @@ func (m *SliceUploadManager) CompleteUpload(ctx context.Context, storage driver.
 func (s *SliceUploadSession) ensureTmpFile() error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	if s.TmpFile == "" {
-		tempDirPath := tempdir.GetPersistentTempDir()
-		
 		// 使用TaskID作为文件名的一部分，确保唯一性和可识别性
 		filename := fmt.Sprintf("slice_upload_%s_%s", s.TaskID, s.Name)
 		// 清理文件名中的特殊字符
 		filename = strings.ReplaceAll(filename, "/", "_")
 		filename = strings.ReplaceAll(filename, "\\", "_")
 		filename = strings.ReplaceAll(filename, ":", "_")
-		
-		tmpPath := filepath.Join(tempDirPath, filename)
-		
+
+		tmpPath := filepath.Join(conf.GetPersistentTempDir(), filename)
+
 		tf, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_RDWR, 0644)
 		if err != nil {
 			return fmt.Errorf("create persistent temp file error: %w", err)
 		}
-		
+
 		if err = os.Truncate(tmpPath, int64(s.Size)); err != nil {
-			tf.Close() // 确保文件被关闭
+			tf.Close()         // 确保文件被关闭
 			os.Remove(tmpPath) // 清理文件
 			return fmt.Errorf("truncate persistent temp file error: %w", err)
 		}
-		
+
 		s.TmpFile = tmpPath
 		s.tmpFile = tf
-		
+
 		// 更新数据库中的临时文件路径，支持重启后恢复
 		if updateErr := db.UpdateSliceUpload(s.SliceUpload); updateErr != nil {
 			log.Errorf("Failed to update temp file path in database: %v", updateErr)
 			// 不返回错误，因为文件已经创建成功，只是数据库更新失败
 		}
-		
+
 		log.Debugf("Created persistent temp file: %s", tmpPath)
 		return nil
 	}
-	
+
 	if s.tmpFile == nil {
 		var err error
 		s.tmpFile, err = os.OpenFile(s.TmpFile, os.O_RDWR, 0644)
@@ -543,14 +534,14 @@ func (s *SliceUploadSession) ensureTmpFile() error {
 func (s *SliceUploadSession) cleanup() {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	
+
 	if s.tmpFile != nil {
 		if closeErr := s.tmpFile.Close(); closeErr != nil {
 			log.Errorf("Failed to close tmp file: %v", closeErr)
 		}
 		s.tmpFile = nil
 	}
-	
+
 	if s.TmpFile != "" {
 		if removeErr := os.Remove(s.TmpFile); removeErr != nil && !os.IsNotExist(removeErr) {
 			log.Errorf("Failed to remove tmp file %s: %v", s.TmpFile, removeErr)
@@ -600,13 +591,13 @@ func (sr *sliceReader) Read(p []byte) (int, error) {
 	if sr.position >= sr.size {
 		return 0, io.EOF
 	}
-	
+
 	// 计算实际可读取的字节数
 	remaining := sr.size - sr.position
 	if int64(len(p)) > remaining {
 		p = p[:remaining]
 	}
-	
+
 	n, err := sr.file.ReadAt(p, sr.offset+sr.position)
 	sr.position += int64(n)
 	return n, err
@@ -625,14 +616,14 @@ func (sr *sliceReader) Seek(offset int64, whence int) (int64, error) {
 	default:
 		return 0, fmt.Errorf("invalid whence value: %d", whence)
 	}
-	
+
 	if newPos < 0 {
 		return 0, fmt.Errorf("negative position: %d", newPos)
 	}
 	if newPos > sr.size {
 		newPos = sr.size
 	}
-	
+
 	sr.position = newPos
 	return newPos, nil
 }
@@ -691,7 +682,7 @@ func (m *SliceUploadManager) recoverSingleUpload(upload *tables.SliceUpload) {
 
 	// 部分切片未完成的情况
 	completedSlices := tables.CountUploadedSlices(upload.SliceUploadStatus)
-	log.Infof("Task %s: %d/%d slices completed, marking as available for resume", 
+	log.Infof("Task %s: %d/%d slices completed, marking as available for resume",
 		upload.TaskID, completedSlices, upload.SliceCnt)
 
 	// 更新状态为等待用户继续上传
@@ -718,11 +709,11 @@ func (m *SliceUploadManager) attemptCompleteUpload(upload *tables.SliceUpload) {
 	// 所以我们将状态标记为待完成，等用户下次操作时自动完成
 	upload.Status = tables.SliceUploadStatusPendingComplete
 	upload.Message = "All slices completed, waiting for final completion"
-	
+
 	if err := db.UpdateSliceUpload(upload); err != nil {
 		log.Errorf("Failed to update slice upload to pending complete for task %s: %v", upload.TaskID, err)
 		return
 	}
-	
+
 	log.Infof("Task %s marked as pending completion", upload.TaskID)
 }
