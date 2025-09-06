@@ -246,8 +246,8 @@ func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Dri
 	if req.SliceHash != "" {
 		session.mutex.Lock()
 
-		//验证分片hash值
-		if req.SliceNum == 0 { //第一个分片，slicehash是所有的分片hash
+		// 验证分片hash值
+		if req.SliceNum == 0 { // 第一个分片，slicehash是所有的分片hash
 			hs := strings.Split(req.SliceHash, ",")
 			if len(hs) != int(session.SliceCnt) {
 				session.mutex.Unlock()
@@ -257,7 +257,8 @@ func (m *SliceUploadManager) UploadSlice(ctx context.Context, storage driver.Dri
 			}
 			session.SliceHash = req.SliceHash // 存储完整的hash字符串
 		} else {
-			session.SliceHash = req.SliceHash // 存储单个分片hash
+			// 非第0个分片，不覆盖 SliceHash，保持完整的hash列表
+			log.Debugf("Slice %d hash: %s (keeping complete hash list)", req.SliceNum, req.SliceHash)
 		}
 		session.mutex.Unlock()
 	}
