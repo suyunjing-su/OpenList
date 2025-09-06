@@ -250,10 +250,12 @@ func FsPreup(c *gin.Context) {
 
 	storage := c.Request.Context().Value(conf.StorageKey).(driver.Driver)
 	path := c.Request.Context().Value(conf.PathKey).(string)
-	fullPath := utils.FixAndCleanPath(stdpath.Join(path, req.Name))
-	if res, _ := fs.Get(c.Request.Context(), fullPath, &fs.GetArgs{NoLog: true}); res != nil && !req.Overwrite {
-		common.ErrorStrResp(c, "file exists", 403)
-		return
+	if !req.Overwrite {
+		fullPath := utils.FixAndCleanPath(stdpath.Join(path, req.Name))
+		if res, _ := fs.Get(c.Request.Context(), fullPath, &fs.GetArgs{NoLog: true}); res != nil {
+			common.ErrorStrResp(c, "file exists", 403)
+			return
+		}
 	}
 
 	res, err := fs.Preup(c.Request.Context(), storage, path, req)

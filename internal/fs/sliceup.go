@@ -42,8 +42,8 @@ type SliceUploadSession struct {
 // NewSliceUploadManager 创建分片上传管理器
 func NewSliceUploadManager() *SliceUploadManager {
 	manager := &SliceUploadManager{}
-	// 启动时恢复未完成的上传任务
-	go manager.recoverIncompleteUploads()
+	// 系统重启后清理未完成的上传任务，因为前端session会失效
+	go manager.cleanupIncompleteUploads()
 	return manager
 }
 
@@ -532,18 +532,18 @@ func (sw *sliceWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// recoverIncompleteUploads 恢复重启后未完成的上传任务
-func (m *SliceUploadManager) recoverIncompleteUploads() {
+// cleanupIncompleteUploads 清理重启后未完成的上传任务和临时文件
+func (m *SliceUploadManager) cleanupIncompleteUploads() {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Errorf("Panic in recoverIncompleteUploads: %v", r)
+			log.Errorf("Panic in cleanupIncompleteUploads: %v", r)
 		}
 	}()
 
 	// 等待一段时间，确保系统完全启动
 	time.Sleep(10 * time.Second)
 
-	log.Info("Starting recovery of incomplete slice uploads...")
+	log.Info("Starting cleanup of incomplete slice uploads after restart...")
 
 	// 查询所有未完成的上传任务
 	incompleteUploads, err := db.GetIncompleteSliceUploads()
@@ -557,67 +557,43 @@ func (m *SliceUploadManager) recoverIncompleteUploads() {
 		return
 	}
 
-	log.Infof("Found %d incomplete slice uploads, starting recovery...", len(incompleteUploads))
+	log.Infof("Found %d incomplete slice uploads, starting cleanup...", len(incompleteUploads))
 
+	cleanedCount := 0
 	for _, upload := range incompleteUploads {
-		m.recoverSingleUpload(upload)
+		if m.cleanupSingleUpload(upload) {
+			cleanedCount++
+		}
 	}
 
-	log.Info("Slice upload recovery completed")
+	log.Infof("Slice upload cleanup completed, cleaned up %d tasks", cleanedCount)
 }
 
-// recoverSingleUpload 恢复单个上传任务
-func (m *SliceUploadManager) recoverSingleUpload(upload *tables.SliceUpload) {
+// cleanupSingleUpload 清理单个上传任务
+func (m *SliceUploadManager) cleanupSingleUpload(upload *tables.SliceUpload) bool {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Errorf("Panic in recoverSingleUpload for task %s: %v", upload.TaskID, r)
+			log.Errorf("Panic in cleanupSingleUpload for task %s: %v", upload.TaskID, r)
 		}
 	}()
 
-	log.Infof("Recovering upload task: %s, status: %s", upload.TaskID, upload.Status)
+	log.Infof("Cleaning up upload task: %s, status: %s", upload.TaskID, upload.Status)
 
-	// 检查是否所有切片都已上传完成
-	if tables.IsAllSliceUploaded(upload.SliceUploadStatus, upload.SliceCnt) {
-		// 所有切片都已完成，尝试完成上传
-		log.Infof("All slices completed for task %s, attempting to complete upload", upload.TaskID)
-		m.attemptCompleteUpload(upload)
-		return
-	}
-
-	// 部分切片未完成的情况
-	completedSlices := tables.CountUploadedSlices(upload.SliceUploadStatus)
-	log.Infof("Task %s: %d/%d slices completed, marking as available for resume",
-		upload.TaskID, completedSlices, upload.SliceCnt)
-
-	// 更新状态为等待用户继续上传
-	upload.Status = tables.SliceUploadStatusWaiting
-	upload.Message = "Ready for resume after server restart"
-	if err := db.UpdateSliceUpload(upload); err != nil {
-		log.Errorf("Failed to update slice upload status for task %s: %v", upload.TaskID, err)
-	}
-
-	// 如果有临时文件但文件不存在，清理记录
+	// 清理临时文件
 	if upload.TmpFile != "" {
-		if _, err := os.Stat(upload.TmpFile); os.IsNotExist(err) {
-			log.Warnf("Temporary file lost for task %s, cleaning up", upload.TaskID)
-			if err := db.DeleteSliceUploadByTaskID(upload.TaskID); err != nil {
-				log.Errorf("Failed to clean up lost task %s: %v", upload.TaskID, err)
-			}
+		if err := os.Remove(upload.TmpFile); err != nil && !os.IsNotExist(err) {
+			log.Warnf("Failed to remove temp file %s for task %s: %v", upload.TmpFile, upload.TaskID, err)
+		} else {
+			log.Debugf("Removed temp file: %s", upload.TmpFile)
 		}
 	}
-}
 
-// attemptCompleteUpload 尝试完成上传（用于恢复已完成切片的任务）
-func (m *SliceUploadManager) attemptCompleteUpload(upload *tables.SliceUpload) {
-	// 这里需要获取存储驱动，但在恢复阶段我们无法直接获取 storage driver
-	// 所以我们将状态标记为待完成，等用户下次操作时自动完成
-	upload.Status = tables.SliceUploadStatusPendingComplete
-	upload.Message = "All slices completed, waiting for final completion"
-
-	if err := db.UpdateSliceUpload(upload); err != nil {
-		log.Errorf("Failed to update slice upload to pending complete for task %s: %v", upload.TaskID, err)
-		return
+	// 从数据库中删除任务记录
+	if err := db.DeleteSliceUploadByTaskID(upload.TaskID); err != nil {
+		log.Errorf("Failed to delete slice upload task %s: %v", upload.TaskID, err)
+		return false
 	}
 
-	log.Infof("Task %s marked as pending completion", upload.TaskID)
+	log.Infof("Successfully cleaned up task: %s", upload.TaskID)
+	return true
 }
