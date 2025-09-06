@@ -211,7 +211,7 @@ func (d *Open123) sliceUpComplete(uploadID string) error {
 		log.Error("123 open uploadComplete error", err)
 		return err
 	}
-	log.Infof("upload complete,body: %s", string(b))
+	log.Debugf("upload complete,body: %s", string(b))
 	if r.Data.Completed {
 		return nil
 	}

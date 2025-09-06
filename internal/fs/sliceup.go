@@ -63,7 +63,7 @@ func (m *SliceUploadManager) CreateSession(ctx context.Context, storage driver.D
 		AsTask:       req.AsTask,
 		UserID:       user.ID,
 	}
-	log.Infof("storage mount path %s", storage.GetStorage().MountPath)
+	log.Debugf("storage mount path %s", storage.GetStorage().MountPath)
 
 	switch st := storage.(type) {
 	case driver.IPreup:

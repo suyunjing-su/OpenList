@@ -111,7 +111,7 @@ func CleanupOrphanedSliceUploads() error {
 	}
 
 	if cleanedCount > 0 {
-		log.Infof("Cleaned up %d orphaned slice upload tasks", cleanedCount)
+		log.Debugf("Cleaned up %d orphaned slice upload tasks", cleanedCount)
 	}
 
 	return cleanupOrphanedTempFiles()
@@ -187,7 +187,7 @@ func cleanupOrphanedTempFiles() error {
 	}
 
 	if cleanedCount > 0 {
-		log.Infof("Cleaned up %d orphaned temp files from %s", cleanedCount, tempDir)
+		log.Debugf("Cleaned up %d orphaned temp files from %s", cleanedCount, tempDir)
 	}
 
 	return nil
