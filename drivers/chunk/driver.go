@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"io"
 	stdpath "path"
-	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
-	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/fs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
@@ -23,7 +21,6 @@ import (
 type Chunk struct {
 	model.Storage
 	Addition
-	partNameMatchRe *regexp.Regexp
 }
 
 func (d *Chunk) Config() driver.Config {
@@ -39,7 +36,6 @@ func (d *Chunk) Init(ctx context.Context) error {
 		return errors.New("part size must be positive")
 	}
 	d.RemotePath = utils.FixAndCleanPath(d.RemotePath)
-	d.partNameMatchRe = regexp.MustCompile("^(.+)\\.openlist_chunk_(\\d+)" + regexp.QuoteMeta(d.CustomExt) + "$")
 	return nil
 }
 
@@ -55,106 +51,126 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 			Path:     "/",
 		}, nil
 	}
-	dir, base := stdpath.Split(stdpath.Join(d.RemotePath, path))
-	objs, err := fs.List(ctx, dir, &fs.ListArgs{NoLog: true})
+	storage, reqActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
 	if err != nil {
 		return nil, err
 	}
-	partPrefix := base + ".openlist_chunk_"
-	var first model.Obj
+	reqPath := stdpath.Join(reqActualPath, path)
+	obj, err := op.Get(ctx, storage, reqPath)
+	if err == nil {
+		return &model.Object{
+			Path:     path,
+			Name:     obj.GetName(),
+			Size:     obj.GetSize(),
+			Modified: obj.ModTime(),
+			IsFolder: obj.IsDir(),
+			HashInfo: obj.GetHash(),
+		}, nil
+	}
+
+	dir, base := stdpath.Split(reqPath)
+	reqPath = stdpath.Join(dir, "[openlist_chunk]"+base)
+	obj, err = op.Get(ctx, storage, reqPath)
+	if err != nil {
+		return nil, err
+	}
+	chunkObjs, err := op.List(ctx, storage, reqPath, model.ListArgs{})
+	if err != nil {
+		return nil, err
+	}
 	var totalSize int64 = 0
 	chunkSizes := []int64{-1}
-	for _, obj := range objs {
-		if obj.GetName() == base {
-			first = obj
-			if obj.IsDir() {
-				totalSize = obj.GetSize()
-				break
-			} else {
-				totalSize += obj.GetSize()
-				chunkSizes[0] = obj.GetSize()
-			}
-		} else if suffix, ok := strings.CutPrefix(obj.GetName(), partPrefix); ok {
-			idx, err := strconv.Atoi(strings.TrimSuffix(suffix, d.CustomExt))
-			if err != nil {
-				return nil, fmt.Errorf("invalid chunk part name: %s", obj.GetName())
-			}
-			totalSize += obj.GetSize()
-			if len(chunkSizes) > idx {
-				chunkSizes[idx] = obj.GetSize()
-			} else if len(chunkSizes) == idx {
-				chunkSizes = append(chunkSizes, obj.GetSize())
-			} else {
-				newChunkSizes := make([]int64, idx+1)
-				copy(newChunkSizes, chunkSizes)
-				chunkSizes = newChunkSizes
-				chunkSizes[idx] = obj.GetSize()
-			}
+	for _, o := range chunkObjs {
+		if o.IsDir() {
+			continue
+		}
+		idx, err := strconv.Atoi(strings.TrimSuffix(o.GetName(), d.CustomExt))
+		if err != nil {
+			continue
+		}
+		totalSize += o.GetSize()
+		if len(chunkSizes) > idx {
+			chunkSizes[idx] = o.GetSize()
+		} else if len(chunkSizes) == idx {
+			chunkSizes = append(chunkSizes, o.GetSize())
+		} else {
+			newChunkSizes := make([]int64, idx+1)
+			copy(newChunkSizes, chunkSizes)
+			chunkSizes = newChunkSizes
+			chunkSizes[idx] = o.GetSize()
 		}
 	}
-	if first == nil {
-		return nil, errs.ObjectNotFound
-	}
-	for i, l := 0, len(chunkSizes)-1; i <= l; i++ {
+	for i, l := 0, len(chunkSizes)-2; i <= l; i++ {
 		if (i == 0 && chunkSizes[i] == -1) || chunkSizes[i] == 0 {
-			return nil, fmt.Errorf("some chunk parts are missing for file: %s", base)
+			return nil, fmt.Errorf("chunk part[%d] are missing", i)
 		}
 	}
+	reqDir, _ := stdpath.Split(path)
 	return &chunkObject{
 		Object: model.Object{
-			Path:     path,
+			Path:     stdpath.Join(reqDir, "[openlist_chunk]"+base),
 			Name:     base,
 			Size:     totalSize,
-			Modified: first.ModTime(),
-			Ctime:    first.CreateTime(),
-			IsFolder: first.IsDir(),
+			Modified: obj.ModTime(),
+			Ctime:    obj.CreateTime(),
 		},
 		chunkSizes: chunkSizes,
 	}, nil
 }
 
 func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
-	objs, err := fs.List(ctx, stdpath.Join(d.RemotePath, dir.GetPath()), &fs.ListArgs{NoLog: true, Refresh: args.Refresh})
+	storage, reqActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
 	if err != nil {
 		return nil, err
 	}
-	ret := make([]model.Obj, 0)
-	sizeMap := make(map[string]int64)
-	for _, obj := range objs {
-		if obj.IsDir() {
-			ret = append(ret, &model.Object{
+	dirPath := stdpath.Join(reqActualPath, dir.GetPath())
+	objs, err := op.List(ctx, storage, dirPath, model.ListArgs{Refresh: args.Refresh})
+	if err != nil {
+		return nil, err
+	}
+	return utils.SliceConvert(objs, func(obj model.Obj) (model.Obj, error) {
+		if !obj.IsDir() || !strings.HasPrefix(obj.GetName(), "[openlist_chunk]") {
+			thumb, ok := model.GetThumb(obj)
+			objRes := model.Object{
 				Name:     obj.GetName(),
 				Size:     obj.GetSize(),
 				Modified: obj.ModTime(),
-				Ctime:    obj.CreateTime(),
-				IsFolder: true,
-			})
-			continue
+				IsFolder: obj.IsDir(),
+			}
+			if !ok {
+				return &objRes, nil
+			}
+			return &model.ObjThumb{
+				Object: objRes,
+				Thumbnail: model.Thumbnail{
+					Thumbnail: thumb,
+				},
+			}, nil
 		}
-		var name string
-		matches := d.partNameMatchRe.FindStringSubmatch(obj.GetName())
-		if len(matches) < 3 {
-			ret = append(ret, &model.Object{
-				Name:     obj.GetName(),
-				Size:     0,
-				Modified: obj.ModTime(),
-				Ctime:    obj.CreateTime(),
-				IsFolder: false,
-			},
-			)
-			name = obj.GetName()
-		} else {
-			name = matches[1]
+		reqPath := stdpath.Join(dirPath, obj.GetName())
+		chunkObjs, err := op.List(ctx, storage, reqPath, model.ListArgs{Refresh: args.Refresh})
+		if err != nil {
+			return nil, err
 		}
-		sizeMap[name] += obj.GetSize()
-	}
-	for _, obj := range ret {
-		if !obj.IsDir() {
-			cObj := obj.(*model.Object)
-			cObj.Size = sizeMap[cObj.GetName()]
+		totalSize := int64(0)
+		for _, o := range chunkObjs {
+			if o.IsDir() {
+				continue
+			}
+			_, err := strconv.Atoi(strings.TrimSuffix(o.GetName(), d.CustomExt))
+			if err != nil {
+				continue
+			}
+			totalSize += o.GetSize()
 		}
-	}
-	return ret, nil
+		return &model.Object{
+			Name:     strings.TrimPrefix(obj.GetName(), "[openlist_chunk]"),
+			Path:     reqPath,
+			Size:     totalSize,
+			Modified: obj.ModTime(),
+			Ctime:    obj.CreateTime(),
+		}, nil
+	})
 }
 
 func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
@@ -162,12 +178,17 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 	if err != nil {
 		return nil, err
 	}
-	chunkFile := file.(*chunkObject)
 	args.Redirect = false
-	path := stdpath.Join(reqActualPath, chunkFile.GetPath())
-	if len(chunkFile.chunkSizes) <= 1 {
-		l, _, err := op.Link(ctx, storage, path, args)
-		return l, err
+	chunkFile, ok := file.(*chunkObject)
+	reqPath := stdpath.Join(reqActualPath, file.GetPath())
+	if !ok {
+		l, _, err := op.Link(ctx, storage, reqPath, args)
+		if err != nil {
+			return nil, err
+		}
+		resultLink := *l
+		resultLink.SyncClosers = utils.NewSyncClosers(l)
+		return &resultLink, nil
 	}
 	fileSize := chunkFile.GetSize()
 	mergedRrf := func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
@@ -187,7 +208,7 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 		)
 		for idx, chunkSize := range chunkFile.chunkSizes {
 			if readFrom {
-				l, o, err := op.Link(ctx, storage, d.getPartName(path, idx), args)
+				l, o, err := op.Link(ctx, storage, stdpath.Join(reqPath, d.getPartName(idx)), args)
 				if err != nil {
 					_ = cs.Close()
 					return nil, err
@@ -199,7 +220,7 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 				}
 				if chunkSize2 != chunkSize {
 					_ = cs.Close()
-					return nil, fmt.Errorf("chunk part size changed, please retry: %s", o.GetPath())
+					return nil, fmt.Errorf("chunk part[%d] size not match", idx)
 				}
 				rrf, err := stream.GetRangeReaderFromLink(chunkSize2, l)
 				if err != nil {
@@ -228,7 +249,7 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 			} else if newStart := start - chunkSize; newStart >= 0 {
 				start = newStart
 			} else {
-				l, o, err := op.Link(ctx, storage, d.getPartName(path, idx), args)
+				l, o, err := op.Link(ctx, storage, stdpath.Join(reqPath, d.getPartName(idx)), args)
 				if err != nil {
 					_ = cs.Close()
 					return nil, err
@@ -240,7 +261,7 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 				}
 				if chunkSize2 != chunkSize {
 					_ = cs.Close()
-					return nil, fmt.Errorf("chunk part size not match, need refresh cache: %s", o.GetPath())
+					return nil, fmt.Errorf("chunk part[%d] size not match", idx)
 				}
 				rrf, err := stream.GetRangeReaderFromLink(chunkSize2, l)
 				if err != nil {
@@ -276,87 +297,29 @@ func (d *Chunk) MakeDir(ctx context.Context, parentDir model.Obj, dirName string
 }
 
 func (d *Chunk) Move(ctx context.Context, srcObj, dstDir model.Obj) error {
-	path := stdpath.Join(d.RemotePath, srcObj.GetPath())
+	src := stdpath.Join(d.RemotePath, srcObj.GetPath())
 	dst := stdpath.Join(d.RemotePath, dstDir.GetPath())
-	if srcObj.IsDir() {
-		_, err := fs.Move(ctx, path, dst)
-		return err
-	}
-	dir, base := stdpath.Split(path)
-	objs, err := fs.List(ctx, dir, &fs.ListArgs{NoLog: true})
-	if err != nil {
-		return err
-	}
-	for _, obj := range objs {
-		suffix := strings.TrimPrefix(obj.GetName(), base)
-		if suffix != obj.GetName() && strings.HasPrefix(suffix, ".openlist_chunk_") {
-			_, e := fs.Move(ctx, path+suffix, dst, true)
-			err = errors.Join(err, e)
-		}
-	}
-	_, e := fs.Move(ctx, path, dst)
-	return errors.Join(err, e)
+	_, err := fs.Move(ctx, src, dst)
+	return err
 }
 
 func (d *Chunk) Rename(ctx context.Context, srcObj model.Obj, newName string) error {
-	path := stdpath.Join(d.RemotePath, srcObj.GetPath())
-	if srcObj.IsDir() {
-		return fs.Rename(ctx, path, newName)
+	chunkObj, ok := srcObj.(*chunkObject)
+	if !ok {
+		return fs.Rename(ctx, stdpath.Join(d.RemotePath, srcObj.GetPath()), newName)
 	}
-	dir, base := stdpath.Split(path)
-	objs, err := fs.List(ctx, dir, &fs.ListArgs{NoLog: true})
-	if err != nil {
-		return err
-	}
-	for _, obj := range objs {
-		suffix := strings.TrimPrefix(obj.GetName(), base)
-		if suffix != obj.GetName() && strings.HasPrefix(suffix, ".openlist_chunk_") {
-			err = errors.Join(err, fs.Rename(ctx, path+suffix, newName+suffix, true))
-		}
-	}
-	return errors.Join(err, fs.Rename(ctx, path, newName))
+	return fs.Rename(ctx, stdpath.Join(d.RemotePath, chunkObj.GetPath()), "[openlist_chunk]"+newName)
 }
 
 func (d *Chunk) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
-	path := stdpath.Join(d.RemotePath, srcObj.GetPath())
 	dst := stdpath.Join(d.RemotePath, dstDir.GetPath())
-	if srcObj.IsDir() {
-		_, err := fs.Copy(ctx, path, dst)
-		return err
-	}
-	dir, base := stdpath.Split(path)
-	objs, err := fs.List(ctx, dir, &fs.ListArgs{NoLog: true})
-	if err != nil {
-		return err
-	}
-	for _, obj := range objs {
-		suffix := strings.TrimPrefix(obj.GetName(), base)
-		if suffix != obj.GetName() && strings.HasPrefix(suffix, ".openlist_chunk_") {
-			_, e := fs.Copy(ctx, path+suffix, dst, true)
-			err = errors.Join(err, e)
-		}
-	}
-	_, e := fs.Copy(ctx, path, dst)
-	return errors.Join(err, e)
+	src := stdpath.Join(d.RemotePath, srcObj.GetPath())
+	_, err := fs.Copy(ctx, src, dst)
+	return err
 }
 
 func (d *Chunk) Remove(ctx context.Context, obj model.Obj) error {
-	path := stdpath.Join(d.RemotePath, obj.GetPath())
-	if obj.IsDir() {
-		return fs.Remove(ctx, path)
-	}
-	dir, base := stdpath.Split(path)
-	objs, err := fs.List(ctx, dir, &fs.ListArgs{NoLog: true})
-	if err != nil {
-		return err
-	}
-	for _, o := range objs {
-		suffix := strings.TrimPrefix(o.GetName(), base)
-		if suffix != o.GetName() && strings.HasPrefix(suffix, ".openlist_chunk_") {
-			err = errors.Join(err, fs.Remove(ctx, path+suffix))
-		}
-	}
-	return errors.Join(err, fs.Remove(ctx, path))
+	return fs.Remove(ctx, stdpath.Join(d.RemotePath, obj.GetPath()))
 }
 
 func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) error {
@@ -368,7 +331,7 @@ func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStream
 		Reader:         file,
 		UpdateProgress: up,
 	}
-	dst := stdpath.Join(reqActualPath, dstDir.GetPath())
+	dst := stdpath.Join(reqActualPath, dstDir.GetPath(), "[openlist_chunk]"+file.GetName())
 	fullPartCount := int(file.GetSize() / d.PartSize)
 	tailSize := file.GetSize() % d.PartSize
 	if tailSize == 0 && fullPartCount > 0 {
@@ -379,7 +342,7 @@ func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStream
 	for partIndex < fullPartCount {
 		err = errors.Join(err, op.Put(ctx, storage, dst, &stream.FileStream{
 			Obj: &model.Object{
-				Name:     d.getPartName(file.GetName(), partIndex),
+				Name:     d.getPartName(partIndex),
 				Size:     d.PartSize,
 				Modified: file.ModTime(),
 			},
@@ -390,7 +353,7 @@ func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStream
 	}
 	return errors.Join(err, op.Put(ctx, storage, dst, &stream.FileStream{
 		Obj: &model.Object{
-			Name:     d.getPartName(file.GetName(), fullPartCount),
+			Name:     d.getPartName(fullPartCount),
 			Size:     tailSize,
 			Modified: file.ModTime(),
 		},
@@ -399,11 +362,8 @@ func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStream
 	}, nil))
 }
 
-func (d *Chunk) getPartName(name string, part int) string {
-	if part == 0 {
-		return name
-	}
-	return fmt.Sprintf("%s.openlist_chunk_%d%s", name, part, d.CustomExt)
+func (d *Chunk) getPartName(part int) string {
+	return fmt.Sprintf("%d%s", part, d.CustomExt)
 }
 
 var _ driver.Driver = (*Chunk)(nil)
