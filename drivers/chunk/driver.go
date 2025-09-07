@@ -192,19 +192,18 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 					_ = cs.Close()
 					return nil, err
 				}
+				cs = append(cs, l)
 				chunkSize2 := l.ContentLength
 				if chunkSize2 <= 0 {
 					chunkSize2 = o.GetSize()
 				}
 				if chunkSize2 != chunkSize {
 					_ = cs.Close()
-					_ = l.Close()
 					return nil, fmt.Errorf("chunk part size changed, please retry: %s", o.GetPath())
 				}
 				rrf, err := stream.GetRangeReaderFromLink(chunkSize2, l)
 				if err != nil {
 					_ = cs.Close()
-					_ = l.Close()
 					return nil, err
 				}
 				newLength := length - chunkSize2
@@ -219,7 +218,7 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 					return nil, err
 				}
 				rs = append(rs, rc)
-				cs = append(cs, rc, l)
+				cs = append(cs, rc)
 				if newLength <= 0 {
 					return utils.ReadCloser{
 						Reader: io.MultiReader(rs...),
@@ -232,22 +231,20 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 				l, o, err := op.Link(ctx, storage, d.getPartName(path, idx), args)
 				if err != nil {
 					_ = cs.Close()
-					_ = l.Close()
 					return nil, err
 				}
+				cs = append(cs, l)
 				chunkSize2 := l.ContentLength
 				if chunkSize2 <= 0 {
 					chunkSize2 = o.GetSize()
 				}
 				if chunkSize2 != chunkSize {
 					_ = cs.Close()
-					_ = l.Close()
 					return nil, fmt.Errorf("chunk part size not match, need refresh cache: %s", o.GetPath())
 				}
 				rrf, err := stream.GetRangeReaderFromLink(chunkSize2, l)
 				if err != nil {
 					_ = cs.Close()
-					_ = l.Close()
 					return nil, err
 				}
 				rc, err = rrf.RangeRead(ctx, http_range.Range{Start: start, Length: -1})
@@ -255,7 +252,7 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 					return nil, err
 				}
 				length -= chunkSize2 - start
-				cs = append(cs, rc, l)
+				cs = append(cs, rc)
 				if length <= 0 {
 					return utils.ReadCloser{
 						Reader: rc,
@@ -263,7 +260,6 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 					}, nil
 				}
 				rs = append(rs, rc)
-				cs = append(cs, rc, l)
 				readFrom = true
 			}
 		}

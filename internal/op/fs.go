@@ -327,11 +327,8 @@ func Link(ctx context.Context, storage driver.Driver, path string, args model.Li
 		return nil
 	})
 	link, err, _ := linkG.Do(key, fn)
-	if err == nil && !link.AcquireReference() {
+	for err == nil && !link.AcquireReference() {
 		link, err, _ = linkG.Do(key, fn)
-		if err == nil {
-			link.AcquireReference()
-		}
 	}
 
 	if err == errLinkMFileCache {
