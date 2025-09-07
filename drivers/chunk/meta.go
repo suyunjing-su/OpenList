@@ -9,6 +9,7 @@ type Addition struct {
 	RemotePath string `json:"remote_path" required:"true"`
 	PartSize   int64  `json:"part_size" required:"true" type:"number" help:"bytes"`
 	CustomExt  string `json:"custom_ext" type:"string"`
+	StoreHash  bool   `json:"store_hash" type:"bool" default:"true"`
 }
 
 var config = driver.Config{

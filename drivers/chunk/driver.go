@@ -1,6 +1,7 @@
 package chunk
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -80,9 +81,21 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 	}
 	var totalSize int64 = 0
 	chunkSizes := []int64{-1}
+	h := make(map[*utils.HashType]string)
 	for _, o := range chunkObjs {
 		if o.IsDir() {
 			continue
+		}
+		if strings.HasPrefix(o.GetName(), "hash_") {
+			typeValue := strings.TrimSuffix(strings.TrimPrefix(o.GetName(), "hash_"), d.CustomExt)
+			hn, value, ok := strings.Cut(typeValue, "_")
+			if ok {
+				ht, ok := utils.GetHashByName(hn)
+				if ok {
+					h[ht] = value
+				}
+				continue
+			}
 		}
 		idx, err := strconv.Atoi(strings.TrimSuffix(o.GetName(), d.CustomExt))
 		if err != nil {
@@ -113,6 +126,7 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 			Size:     totalSize,
 			Modified: obj.ModTime(),
 			Ctime:    obj.CreateTime(),
+			HashInfo: utils.NewHashInfoByMap(h),
 		},
 		chunkSizes: chunkSizes,
 	}, nil
@@ -153,9 +167,21 @@ func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 			return nil, err
 		}
 		totalSize := int64(0)
+		h := make(map[*utils.HashType]string)
 		for _, o := range chunkObjs {
 			if o.IsDir() {
 				continue
+			}
+			if strings.HasPrefix(o.GetName(), "hash_") {
+				typeValue := strings.TrimSuffix(strings.TrimPrefix(o.GetName(), "hash_"), d.CustomExt)
+				hn, value, ok := strings.Cut(typeValue, "_")
+				if ok {
+					ht, ok := utils.GetHashByName(hn)
+					if ok {
+						h[ht] = value
+					}
+					continue
+				}
 			}
 			_, err := strconv.Atoi(strings.TrimSuffix(o.GetName(), d.CustomExt))
 			if err != nil {
@@ -169,6 +195,7 @@ func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 			Size:     totalSize,
 			Modified: obj.ModTime(),
 			Ctime:    obj.CreateTime(),
+			HashInfo: utils.NewHashInfoByMap(h),
 		}, nil
 	})
 }
@@ -332,6 +359,19 @@ func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStream
 		UpdateProgress: up,
 	}
 	dst := stdpath.Join(reqActualPath, dstDir.GetPath(), "[openlist_chunk]"+file.GetName())
+	if d.StoreHash {
+		for ht, value := range file.GetHash().All() {
+			_ = op.Put(ctx, storage, dst, &stream.FileStream{
+				Obj: &model.Object{
+					Name:     fmt.Sprintf("hash_%s_%s%s", ht.Name, value, d.CustomExt),
+					Size:     1,
+					Modified: file.ModTime(),
+				},
+				Mimetype: "application/octet-stream",
+				Reader:   bytes.NewReader([]byte{0}), // 兼容不支持空文件的驱动
+			}, nil, true)
+		}
+	}
 	fullPartCount := int(file.GetSize() / d.PartSize)
 	tailSize := file.GetSize() % d.PartSize
 	if tailSize == 0 && fullPartCount > 0 {
