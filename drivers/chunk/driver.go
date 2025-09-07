@@ -100,9 +100,12 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 			chunkSizes[idx] = o.GetSize()
 		}
 	}
-	for i, l := 0, len(chunkSizes)-2; i <= l; i++ {
+	for i, l := 0, len(chunkSizes)-2; ; i++ {
 		if (i == 0 && chunkSizes[i] == -1) || chunkSizes[i] == 0 {
 			return nil, fmt.Errorf("chunk part[%d] are missing", i)
+		}
+		if i >= l {
+			break
 		}
 	}
 	reqDir, _ := stdpath.Split(path)
