@@ -120,7 +120,6 @@ func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 	}
 	ret := make([]model.Obj, 0)
 	sizeMap := make(map[string]int64)
-	chunkSizeMap := make(map[string][]int64)
 	for _, obj := range objs {
 		if obj.IsDir() {
 			ret = append(ret, &model.Object{
@@ -134,51 +133,25 @@ func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 		}
 		var name string
 		matches := d.partNameMatchRe.FindStringSubmatch(obj.GetName())
-		idx := 0
 		if len(matches) < 3 {
-			ret = append(ret, &chunkObject{
-				Object: model.Object{
-					Name:     obj.GetName(),
-					Size:     0,
-					Modified: obj.ModTime(),
-					Ctime:    obj.CreateTime(),
-					IsFolder: false,
-				},
-			})
+			ret = append(ret, &model.Object{
+				Name:     obj.GetName(),
+				Size:     0,
+				Modified: obj.ModTime(),
+				Ctime:    obj.CreateTime(),
+				IsFolder: false,
+			},
+			)
 			name = obj.GetName()
 		} else {
 			name = matches[1]
-			idx, _ = strconv.Atoi(matches[2])
 		}
 		sizeMap[name] += obj.GetSize()
-		// Collect chunk sizes
-		chunkSizes, ok := chunkSizeMap[name]
-		if !ok {
-			chunkSizes = []int64{-1}
-		}
-		if len(chunkSizes) > idx {
-			chunkSizes[idx] = obj.GetSize()
-		} else if len(chunkSizes) == idx {
-			chunkSizes = append(chunkSizes, obj.GetSize())
-		} else {
-			newChunkSizes := make([]int64, idx+1)
-			copy(newChunkSizes, chunkSizes)
-			chunkSizes = newChunkSizes
-			chunkSizes[idx] = obj.GetSize()
-		}
-		chunkSizeMap[name] = chunkSizes
 	}
 	for _, obj := range ret {
 		if !obj.IsDir() {
-			chunkSizes := chunkSizeMap[obj.GetName()]
-			for i, l := 0, len(chunkSizes)-1; i < l; i++ {
-				if (i == 0 && chunkSizes[i] == -1) || chunkSizes[i] == 0 {
-					return nil, fmt.Errorf("some chunk parts are missing for file: %s", obj.GetName())
-				}
-			}
-			cObj := obj.(*chunkObject)
+			cObj := obj.(*model.Object)
 			cObj.Size = sizeMap[cObj.GetName()]
-			cObj.chunkSizes = chunkSizes
 		}
 	}
 	return ret, nil
