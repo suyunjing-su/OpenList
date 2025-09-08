@@ -71,10 +71,6 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 
 	dir, base := stdpath.Split(reqPath)
 	reqPath = stdpath.Join(dir, "[openlist_chunk]"+base)
-	obj, err = op.Get(ctx, storage, reqPath)
-	if err != nil {
-		return nil, err
-	}
 	chunkObjs, err := op.List(ctx, storage, reqPath, model.ListArgs{})
 	if err != nil {
 		return nil, err
@@ -82,6 +78,7 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 	var totalSize int64 = 0
 	chunkSizes := []int64{-1}
 	h := make(map[*utils.HashType]string)
+	var first model.Obj
 	for _, o := range chunkObjs {
 		if o.IsDir() {
 			continue
@@ -103,6 +100,9 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 		}
 		totalSize += o.GetSize()
 		if len(chunkSizes) > idx {
+			if idx == 0 {
+				first = o
+			}
 			chunkSizes[idx] = o.GetSize()
 		} else if len(chunkSizes) == idx {
 			chunkSizes = append(chunkSizes, o.GetSize())
@@ -127,8 +127,8 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 			Path:     stdpath.Join(reqDir, "[openlist_chunk]"+base),
 			Name:     base,
 			Size:     totalSize,
-			Modified: obj.ModTime(),
-			Ctime:    obj.CreateTime(),
+			Modified: first.ModTime(),
+			Ctime:    first.CreateTime(),
 			HashInfo: utils.NewHashInfoByMap(h),
 		},
 		chunkSizes: chunkSizes,
@@ -171,6 +171,7 @@ func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 		}
 		totalSize := int64(0)
 		h := make(map[*utils.HashType]string)
+		first := obj
 		for _, o := range chunkObjs {
 			if o.IsDir() {
 				continue
@@ -186,18 +187,20 @@ func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 					continue
 				}
 			}
-			_, err := strconv.Atoi(strings.TrimSuffix(o.GetName(), d.CustomExt))
+			idx, err := strconv.Atoi(strings.TrimSuffix(o.GetName(), d.CustomExt))
 			if err != nil {
 				continue
+			}
+			if idx == 0 {
+				first = o
 			}
 			totalSize += o.GetSize()
 		}
 		return &model.Object{
 			Name:     strings.TrimPrefix(obj.GetName(), "[openlist_chunk]"),
-			Path:     reqPath,
 			Size:     totalSize,
-			Modified: obj.ModTime(),
-			Ctime:    obj.CreateTime(),
+			Modified: first.ModTime(),
+			Ctime:    first.CreateTime(),
 			HashInfo: utils.NewHashInfoByMap(h),
 		}, nil
 	})
