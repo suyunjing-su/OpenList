@@ -14,9 +14,11 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/fs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
+	"github.com/OpenListTeam/OpenList/v4/internal/sign"
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+	"github.com/OpenListTeam/OpenList/v4/server/common"
 )
 
 type Chunk struct {
@@ -83,8 +85,8 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 		if o.IsDir() {
 			continue
 		}
-		if strings.HasPrefix(o.GetName(), "hash_") {
-			typeValue := strings.TrimSuffix(strings.TrimPrefix(o.GetName(), "hash_"), d.CustomExt)
+		if after, ok := strings.CutPrefix(o.GetName(), "hash_"); ok {
+			typeValue := strings.TrimSuffix(after, d.CustomExt)
 			hn, value, ok := strings.Cut(typeValue, "_")
 			if ok {
 				ht, ok := utils.GetHashByName(hn)
@@ -122,17 +124,20 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 		}
 	}
 	reqDir, _ := stdpath.Split(path)
-	return &chunkObject{
+	objRes := chunkObject{
 		Object: model.Object{
 			Path:     stdpath.Join(reqDir, "[openlist_chunk]"+base),
 			Name:     base,
 			Size:     totalSize,
 			Modified: first.ModTime(),
 			Ctime:    first.CreateTime(),
-			HashInfo: utils.NewHashInfoByMap(h),
 		},
 		chunkSizes: chunkSizes,
-	}, nil
+	}
+	if len(h) > 0 {
+		objRes.HashInfo = utils.NewHashInfoByMap(h)
+	}
+	return &objRes, nil
 }
 
 func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
@@ -153,6 +158,7 @@ func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 				Size:     obj.GetSize(),
 				Modified: obj.ModTime(),
 				IsFolder: obj.IsDir(),
+				HashInfo: obj.GetHash(),
 			}
 			if !ok {
 				return &objRes, nil
@@ -172,13 +178,20 @@ func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 		totalSize := int64(0)
 		h := make(map[*utils.HashType]string)
 		first := obj
+		thumb := ""
 		for _, o := range chunkObjs {
 			if o.IsDir() {
 				continue
 			}
-			if strings.HasPrefix(o.GetName(), "hash_") {
-				typeValue := strings.TrimSuffix(strings.TrimPrefix(o.GetName(), "hash_"), d.CustomExt)
-				hn, value, ok := strings.Cut(typeValue, "_")
+			if o.GetName() == "thumbnail.webp" {
+				thumbPath := stdpath.Join(args.ReqPath, obj.GetName(), o.GetName())
+				thumb = fmt.Sprintf("%s/d%s?sign=%s",
+					common.GetApiUrl(ctx),
+					utils.EncodePath(thumbPath, true),
+					sign.Sign(thumbPath))
+			}
+			if after, ok := strings.CutPrefix(strings.TrimSuffix(o.GetName(), d.CustomExt), "hash_"); ok {
+				hn, value, ok := strings.Cut(after, "_")
 				if ok {
 					ht, ok := utils.GetHashByName(hn)
 					if ok {
@@ -196,12 +209,23 @@ func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 			}
 			totalSize += o.GetSize()
 		}
-		return &model.Object{
+		objRes := model.Object{
 			Name:     strings.TrimPrefix(obj.GetName(), "[openlist_chunk]"),
 			Size:     totalSize,
 			Modified: first.ModTime(),
 			Ctime:    first.CreateTime(),
-			HashInfo: utils.NewHashInfoByMap(h),
+		}
+		if len(h) > 0 {
+			objRes.HashInfo = utils.NewHashInfoByMap(h)
+		}
+		if thumb == "" {
+			return &objRes, nil
+		}
+		return &model.ObjThumb{
+			Object: objRes,
+			Thumbnail: model.Thumbnail{
+				Thumbnail: thumb,
+			},
 		}, nil
 	})
 }
@@ -211,7 +235,6 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 	if err != nil {
 		return nil, err
 	}
-	args.Redirect = false
 	chunkFile, ok := file.(*chunkObject)
 	reqPath := stdpath.Join(reqActualPath, file.GetPath())
 	if !ok {
