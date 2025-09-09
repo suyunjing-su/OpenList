@@ -54,26 +54,25 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 			Path:     "/",
 		}, nil
 	}
-	storage, reqActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
+	remoteStorage, remoteActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
 	if err != nil {
 		return nil, err
 	}
-	reqPath := stdpath.Join(reqActualPath, path)
-	obj, err := op.Get(ctx, storage, reqPath)
-	if err == nil {
+	remoteActualPath = stdpath.Join(remoteActualPath, path)
+	if remoteObj, err := op.Get(ctx, remoteStorage, remoteActualPath); err == nil {
 		return &model.Object{
 			Path:     path,
-			Name:     obj.GetName(),
-			Size:     obj.GetSize(),
-			Modified: obj.ModTime(),
-			IsFolder: obj.IsDir(),
-			HashInfo: obj.GetHash(),
+			Name:     remoteObj.GetName(),
+			Size:     remoteObj.GetSize(),
+			Modified: remoteObj.ModTime(),
+			IsFolder: remoteObj.IsDir(),
+			HashInfo: remoteObj.GetHash(),
 		}, nil
 	}
 
-	dir, base := stdpath.Split(reqPath)
-	reqPath = stdpath.Join(dir, "[openlist_chunk]"+base)
-	chunkObjs, err := op.List(ctx, storage, reqPath, model.ListArgs{})
+	remoteActualDir, name := stdpath.Split(remoteActualPath)
+	chunkName := "[openlist_chunk]" + name
+	chunkObjs, err := op.List(ctx, remoteStorage, stdpath.Join(remoteActualDir, chunkName), model.ListArgs{})
 	if err != nil {
 		return nil, err
 	}
@@ -86,15 +85,14 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 			continue
 		}
 		if after, ok := strings.CutPrefix(o.GetName(), "hash_"); ok {
-			typeValue := strings.TrimSuffix(after, d.CustomExt)
-			hn, value, ok := strings.Cut(typeValue, "_")
+			hn, value, ok := strings.Cut(strings.TrimSuffix(after, d.CustomExt), "_")
 			if ok {
 				ht, ok := utils.GetHashByName(hn)
 				if ok {
 					h[ht] = value
 				}
-				continue
 			}
+			continue
 		}
 		idx, err := strconv.Atoi(strings.TrimSuffix(o.GetName(), d.CustomExt))
 		if err != nil {
@@ -126,8 +124,8 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 	reqDir, _ := stdpath.Split(path)
 	objRes := chunkObject{
 		Object: model.Object{
-			Path:     stdpath.Join(reqDir, "[openlist_chunk]"+base),
-			Name:     base,
+			Path:     stdpath.Join(reqDir, chunkName),
+			Name:     name,
 			Size:     totalSize,
 			Modified: first.ModTime(),
 			Ctime:    first.CreateTime(),
@@ -141,84 +139,93 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 }
 
 func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
-	storage, reqActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
+	remoteStorage, remoteActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
 	if err != nil {
 		return nil, err
 	}
-	dirPath := stdpath.Join(reqActualPath, dir.GetPath())
-	objs, err := op.List(ctx, storage, dirPath, model.ListArgs{Refresh: args.Refresh})
+	remoteActualDir := stdpath.Join(remoteActualPath, dir.GetPath())
+	remoteObjs, err := op.List(ctx, remoteStorage, remoteActualDir, model.ListArgs{
+		ReqPath: args.ReqPath,
+		Refresh: args.Refresh,
+	})
 	if err != nil {
 		return nil, err
 	}
-	return utils.SliceConvert(objs, func(obj model.Obj) (model.Obj, error) {
-		if !obj.IsDir() || !strings.HasPrefix(obj.GetName(), "[openlist_chunk]") {
-			thumb, ok := model.GetThumb(obj)
-			objRes := model.Object{
-				Name:     obj.GetName(),
-				Size:     obj.GetSize(),
-				Modified: obj.ModTime(),
-				IsFolder: obj.IsDir(),
-				HashInfo: obj.GetHash(),
-			}
-			if !ok {
-				return &objRes, nil
-			}
-			return &model.ObjThumb{
-				Object: objRes,
-				Thumbnail: model.Thumbnail{
-					Thumbnail: thumb,
-				},
-			}, nil
-		}
-		reqPath := stdpath.Join(dirPath, obj.GetName())
-		chunkObjs, err := op.List(ctx, storage, reqPath, model.ListArgs{Refresh: args.Refresh})
-		if err != nil {
-			return nil, err
-		}
-		totalSize := int64(0)
-		h := make(map[*utils.HashType]string)
-		first := obj
-		thumb := ""
-		for _, o := range chunkObjs {
-			if o.IsDir() {
-				continue
-			}
-			if o.GetName() == "thumbnail.webp" {
-				thumbPath := stdpath.Join(args.ReqPath, obj.GetName(), o.GetName())
-				thumb = fmt.Sprintf("%s/d%s?sign=%s",
-					common.GetApiUrl(ctx),
-					utils.EncodePath(thumbPath, true),
-					sign.Sign(thumbPath))
-			}
-			if after, ok := strings.CutPrefix(strings.TrimSuffix(o.GetName(), d.CustomExt), "hash_"); ok {
-				hn, value, ok := strings.Cut(after, "_")
-				if ok {
-					ht, ok := utils.GetHashByName(hn)
-					if ok {
-						h[ht] = value
-					}
-					continue
+	return utils.SliceConvert(remoteObjs, func(obj model.Obj) (model.Obj, error) {
+		rawName := obj.GetName()
+		if obj.IsDir() {
+			if name, ok := strings.CutPrefix(rawName, "[openlist_chunk]"); ok {
+				chunkObjs, err := op.List(ctx, remoteStorage, stdpath.Join(remoteActualDir, rawName), model.ListArgs{
+					ReqPath: stdpath.Join(args.ReqPath, rawName),
+					Refresh: args.Refresh,
+				})
+				if err != nil {
+					return nil, err
 				}
+				totalSize := int64(0)
+				h := make(map[*utils.HashType]string)
+				first := obj
+				thumb := ""
+				for _, o := range chunkObjs {
+					if o.IsDir() {
+						continue
+					}
+					if o.GetName() == "thumbnail.webp" {
+						thumbPath := stdpath.Join(args.ReqPath, rawName, o.GetName())
+						thumb = fmt.Sprintf("%s/d%s?sign=%s",
+							common.GetApiUrl(ctx),
+							utils.EncodePath(thumbPath, true),
+							sign.Sign(thumbPath))
+					}
+					if after, ok := strings.CutPrefix(strings.TrimSuffix(o.GetName(), d.CustomExt), "hash_"); ok {
+						hn, value, ok := strings.Cut(after, "_")
+						if ok {
+							ht, ok := utils.GetHashByName(hn)
+							if ok {
+								h[ht] = value
+							}
+							continue
+						}
+					}
+					idx, err := strconv.Atoi(strings.TrimSuffix(o.GetName(), d.CustomExt))
+					if err != nil {
+						continue
+					}
+					if idx == 0 {
+						first = o
+					}
+					totalSize += o.GetSize()
+				}
+				objRes := model.Object{
+					Name:     name,
+					Size:     totalSize,
+					Modified: first.ModTime(),
+					Ctime:    first.CreateTime(),
+				}
+				if len(h) > 0 {
+					objRes.HashInfo = utils.NewHashInfoByMap(h)
+				}
+				if thumb == "" {
+					return &objRes, nil
+				}
+				return &model.ObjThumb{
+					Object: objRes,
+					Thumbnail: model.Thumbnail{
+						Thumbnail: thumb,
+					},
+				}, nil
 			}
-			idx, err := strconv.Atoi(strings.TrimSuffix(o.GetName(), d.CustomExt))
-			if err != nil {
-				continue
-			}
-			if idx == 0 {
-				first = o
-			}
-			totalSize += o.GetSize()
 		}
+
+		thumb, ok := model.GetThumb(obj)
 		objRes := model.Object{
-			Name:     strings.TrimPrefix(obj.GetName(), "[openlist_chunk]"),
-			Size:     totalSize,
-			Modified: first.ModTime(),
-			Ctime:    first.CreateTime(),
+			Name:     rawName,
+			Size:     obj.GetSize(),
+			Modified: obj.ModTime(),
+			IsFolder: obj.IsDir(),
+			HashInfo: obj.GetHash(),
 		}
-		if len(h) > 0 {
-			objRes.HashInfo = utils.NewHashInfoByMap(h)
-		}
-		if thumb == "" {
+		if !ok {
 			return &objRes, nil
 		}
 		return &model.ObjThumb{
@@ -231,14 +238,14 @@ func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 }
 
 func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
-	storage, reqActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
+	remoteStorage, remoteActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
 	if err != nil {
 		return nil, err
 	}
 	chunkFile, ok := file.(*chunkObject)
-	reqPath := stdpath.Join(reqActualPath, file.GetPath())
+	remoteActualPath = stdpath.Join(remoteActualPath, file.GetPath())
 	if !ok {
-		l, _, err := op.Link(ctx, storage, reqPath, args)
+		l, _, err := op.Link(ctx, remoteStorage, remoteActualPath, args)
 		if err != nil {
 			return nil, err
 		}
@@ -264,7 +271,7 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 		)
 		for idx, chunkSize := range chunkFile.chunkSizes {
 			if readFrom {
-				l, o, err := op.Link(ctx, storage, stdpath.Join(reqPath, d.getPartName(idx)), args)
+				l, o, err := op.Link(ctx, remoteStorage, stdpath.Join(remoteActualPath, d.getPartName(idx)), args)
 				if err != nil {
 					_ = cs.Close()
 					return nil, err
@@ -305,7 +312,7 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 			} else if newStart := start - chunkSize; newStart >= 0 {
 				start = newStart
 			} else {
-				l, o, err := op.Link(ctx, storage, stdpath.Join(reqPath, d.getPartName(idx)), args)
+				l, o, err := op.Link(ctx, remoteStorage, stdpath.Join(remoteActualPath, d.getPartName(idx)), args)
 				if err != nil {
 					_ = cs.Close()
 					return nil, err
@@ -379,7 +386,7 @@ func (d *Chunk) Remove(ctx context.Context, obj model.Obj) error {
 }
 
 func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) error {
-	storage, reqActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
+	remoteStorage, remoteActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
 	if err != nil {
 		return err
 	}
@@ -387,10 +394,10 @@ func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStream
 		Reader:         file,
 		UpdateProgress: up,
 	}
-	dst := stdpath.Join(reqActualPath, dstDir.GetPath(), "[openlist_chunk]"+file.GetName())
+	dst := stdpath.Join(remoteActualPath, dstDir.GetPath(), "[openlist_chunk]"+file.GetName())
 	if d.StoreHash {
 		for ht, value := range file.GetHash().All() {
-			_ = op.Put(ctx, storage, dst, &stream.FileStream{
+			_ = op.Put(ctx, remoteStorage, dst, &stream.FileStream{
 				Obj: &model.Object{
 					Name:     fmt.Sprintf("hash_%s_%s%s", ht.Name, value, d.CustomExt),
 					Size:     1,
@@ -409,7 +416,7 @@ func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStream
 	}
 	partIndex := 0
 	for partIndex < fullPartCount {
-		err = errors.Join(err, op.Put(ctx, storage, dst, &stream.FileStream{
+		err = errors.Join(err, op.Put(ctx, remoteStorage, dst, &stream.FileStream{
 			Obj: &model.Object{
 				Name:     d.getPartName(partIndex),
 				Size:     d.PartSize,
@@ -420,7 +427,7 @@ func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStream
 		}, nil, true))
 		partIndex++
 	}
-	return errors.Join(err, op.Put(ctx, storage, dst, &stream.FileStream{
+	return errors.Join(err, op.Put(ctx, remoteStorage, dst, &stream.FileStream{
 		Obj: &model.Object{
 			Name:     d.getPartName(fullPartCount),
 			Size:     tailSize,
