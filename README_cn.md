@@ -65,6 +65,7 @@ OpenList 是一个由 OpenList 团队独立维护的开源项目，遵循 AGPL-3
   - [x] [WebDAV](https://en.wikipedia.org/wiki/WebDAV)
   - [x] Teambition([中国](https://www.teambition.com), [国际](https://us.teambition.com))
   - [x] [分秒帧](https://www.mediatrack.cn)
+  - [x] [MediaFire](https://www.mediafire.com)
   - [x] [和彩云](https://yun.139.com)（个人、家庭、群组）
   - [x] [YandexDisk](https://disk.yandex.com)
   - [x] [百度网盘](http://pan.baidu.com)
@@ -93,7 +94,6 @@ OpenList 是一个由 OpenList 团队独立维护的开源项目，遵循 AGPL-3
   - [x] [OpenList](https://github.com/OpenListTeam/OpenList)
   - [x] [Teldrive](https://github.com/tgdrive/teldrive)
   - [x] [微云](https://www.weiyun.com)
-- [x] 部署方便，开箱即用
 - [x] 文件预览（PDF、markdown、代码、纯文本等）
 - [x] 画廊模式下的图片预览
 - [x] 视频和音频预览，支持歌词和字幕
