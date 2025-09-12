@@ -14,6 +14,7 @@ Date: 2025-09-14
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"os"
 	"time"
@@ -22,12 +23,14 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	"github.com/OpenListTeam/OpenList/v4/pkg/cron"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 )
 
 type Mediafire struct {
 	model.Storage
 	Addition
+	cron *cron.Cron
 
 	actionToken string
 
@@ -60,12 +63,15 @@ func (d *Mediafire) Init(ctx context.Context) error {
 
 	if _, err := d.getSessionToken(ctx); err != nil {
 
-		//fmt.Printf("Init :: Obtain Session Token \n\n")
+		d.renewToken(ctx)
 
-		if err := d.renewToken(ctx); err != nil {
+		num := rand.Intn(4) + 6
 
-			//fmt.Printf("Init :: Renew Session Token \n\n")
-		}
+		d.cron = cron.NewCron(time.Minute * time.Duration(num))
+		d.cron.Do(func() {
+			d.renewToken(ctx)
+		})
+
 	}
 
 	return nil
