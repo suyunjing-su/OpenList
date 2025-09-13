@@ -9,6 +9,7 @@ import (
 	stdpath "path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/fs"
@@ -19,12 +20,25 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/OpenListTeam/OpenList/v4/server/common"
+	"github.com/OpenListTeam/go-cache"
 )
 
 type Chunk struct {
 	model.Storage
 	Addition
 }
+
+// Chunk metadata cache for performance optimization
+type chunkMetadata struct {
+	TotalSize  int64
+	Hash       map[*utils.HashType]string
+	Thumbnail  string
+	ModTime    time.Time
+	CreateTime time.Time
+	CachedAt   time.Time
+}
+
+var metadataCache = cache.NewMemCache(cache.WithShards[*chunkMetadata](8))
 
 func (d *Chunk) Config() driver.Config {
 	return config
@@ -47,6 +61,10 @@ func (d *Chunk) Drop(ctx context.Context) error {
 }
 
 func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
+	if err := d.validatePathAccess(path); err != nil {
+		return nil, err
+	}
+	
 	if utils.PathEqual(path, "/") {
 		return &model.Object{
 			Name:     "Root",
@@ -155,66 +173,35 @@ func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 		rawName := obj.GetName()
 		if obj.IsDir() {
 			if name, ok := strings.CutPrefix(rawName, "[openlist_chunk]"); ok {
-				chunkObjs, err := op.List(ctx, remoteStorage, stdpath.Join(remoteActualDir, rawName), model.ListArgs{
-					ReqPath: stdpath.Join(args.ReqPath, rawName),
-					Refresh: args.Refresh,
-				})
+				chunkDirPath := stdpath.Join(remoteActualDir, rawName)
+				metadata, err := d.getChunkMetadata(ctx, remoteStorage, chunkDirPath, args)
 				if err != nil {
 					return nil, err
 				}
-				totalSize := int64(0)
-				h := make(map[*utils.HashType]string)
-				first := obj
-				thumb := ""
-				for _, o := range chunkObjs {
-					if o.IsDir() {
-						continue
-					}
-					if o.GetName() == "thumbnail.webp" {
-						thumbPath := stdpath.Join(args.ReqPath, rawName, o.GetName())
-						thumb = fmt.Sprintf("%s/d%s?sign=%s",
-							common.GetApiUrl(ctx),
-							utils.EncodePath(thumbPath, true),
-							sign.Sign(thumbPath))
-					}
-					if after, ok := strings.CutPrefix(strings.TrimSuffix(o.GetName(), d.CustomExt), "hash_"); ok {
-						hn, value, ok := strings.Cut(after, "_")
-						if ok {
-							ht, ok := utils.GetHashByName(hn)
-							if ok {
-								h[ht] = value
-							}
-							continue
-						}
-					}
-					idx, err := strconv.Atoi(strings.TrimSuffix(o.GetName(), d.CustomExt))
-					if err != nil {
-						continue
-					}
-					if idx == 0 {
-						first = o
-					}
-					totalSize += o.GetSize()
-				}
+				
 				objRes := model.Object{
 					Name:     name,
-					Size:     totalSize,
-					Modified: first.ModTime(),
-					Ctime:    first.CreateTime(),
+					Size:     metadata.TotalSize,
+					Modified: metadata.ModTime,
+					Ctime:    metadata.CreateTime,
 				}
-				if len(h) > 0 {
-					objRes.HashInfo = utils.NewHashInfoByMap(h)
+				if len(metadata.Hash) > 0 {
+					objRes.HashInfo = utils.NewHashInfoByMap(metadata.Hash)
 				}
-				if thumb == "" {
+				if metadata.Thumbnail == "" {
 					return &objRes, nil
 				}
 				return &model.ObjThumb{
 					Object: objRes,
 					Thumbnail: model.Thumbnail{
-						Thumbnail: thumb,
+						Thumbnail: metadata.Thumbnail,
 					},
 				}, nil
 			}
+		}
+
+		if !d.AllowDirectAccess && strings.HasPrefix(rawName, "[openlist_chunk]") {
+			return nil, nil // Skip this object
 		}
 
 		thumb, ok := model.GetThumb(obj)
@@ -271,7 +258,7 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 		)
 		for idx, chunkSize := range chunkFile.chunkSizes {
 			if readFrom {
-				l, o, err := op.Link(ctx, remoteStorage, stdpath.Join(remoteActualPath, d.getPartName(idx)), args)
+				l, o, err := d.getLinkForChunk(ctx, chunkFile, remoteStorage, stdpath.Join(remoteActualPath, d.getPartName(idx)), args)
 				if err != nil {
 					_ = cs.Close()
 					return nil, err
@@ -312,7 +299,7 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 			} else if newStart := start - chunkSize; newStart >= 0 {
 				start = newStart
 			} else {
-				l, o, err := op.Link(ctx, remoteStorage, stdpath.Join(remoteActualPath, d.getPartName(idx)), args)
+				l, o, err := d.getLinkForChunk(ctx, chunkFile, remoteStorage, stdpath.Join(remoteActualPath, d.getPartName(idx)), args)
 				if err != nil {
 					_ = cs.Close()
 					return nil, err
@@ -361,10 +348,25 @@ func (d *Chunk) MakeDir(ctx context.Context, parentDir model.Obj, dirName string
 }
 
 func (d *Chunk) Move(ctx context.Context, srcObj, dstDir model.Obj) error {
-	src := stdpath.Join(d.RemotePath, srcObj.GetPath())
-	dst := stdpath.Join(d.RemotePath, dstDir.GetPath())
-	_, err := fs.Move(ctx, src, dst)
-	return err
+	chunkObj, ok := srcObj.(*chunkObject)
+	if !ok {
+		src := stdpath.Join(d.RemotePath, srcObj.GetPath())
+		dst := stdpath.Join(d.RemotePath, dstDir.GetPath())
+		_, err := fs.Move(ctx, src, dst)
+		return err
+	}
+
+	srcPath := stdpath.Join(d.RemotePath, chunkObj.GetPath())
+	dstPath := stdpath.Join(d.RemotePath, dstDir.GetPath())
+	
+	_, err := fs.Move(ctx, srcPath, dstPath)
+	if err != nil {
+		return err
+	}
+
+	d.invalidateMetadataCache(srcPath)
+	d.invalidateMetadataCache(dstPath)
+	return nil
 }
 
 func (d *Chunk) Rename(ctx context.Context, srcObj model.Obj, newName string) error {
@@ -372,7 +374,20 @@ func (d *Chunk) Rename(ctx context.Context, srcObj model.Obj, newName string) er
 	if !ok {
 		return fs.Rename(ctx, stdpath.Join(d.RemotePath, srcObj.GetPath()), newName)
 	}
-	return fs.Rename(ctx, stdpath.Join(d.RemotePath, chunkObj.GetPath()), "[openlist_chunk]"+newName)
+	
+	// Atomic rename operation for chunk directories
+	oldPath := stdpath.Join(d.RemotePath, chunkObj.GetPath())
+	parentDir := stdpath.Dir(oldPath)
+	newPath := stdpath.Join(parentDir, "[openlist_chunk]"+newName)
+	
+	err := fs.Rename(ctx, oldPath, stdpath.Base(newPath))
+	if err != nil {
+		return err
+	}
+
+	d.invalidateMetadataCache(oldPath)
+	d.invalidateMetadataCache(newPath)
+	return nil
 }
 
 func (d *Chunk) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
@@ -383,7 +398,18 @@ func (d *Chunk) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
 }
 
 func (d *Chunk) Remove(ctx context.Context, obj model.Obj) error {
-	return fs.Remove(ctx, stdpath.Join(d.RemotePath, obj.GetPath()))
+	path := stdpath.Join(d.RemotePath, obj.GetPath())
+	err := fs.Remove(ctx, path)
+	if err != nil {
+		return err
+	}
+	
+	// Invalidate cache for chunk objects
+	if chunkObj, ok := obj.(*chunkObject); ok {
+		d.invalidateMetadataCache(stdpath.Join(d.RemotePath, chunkObj.GetPath()))
+	}
+	
+	return nil
 }
 
 func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) error {
@@ -454,11 +480,112 @@ func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStream
 		return fmt.Errorf("failed to upload final chunk: %w", err)
 	}
 	
+	// Invalidate cache after successful upload
+	d.invalidateMetadataCache(dst)
+	
 	return nil
 }
 
 func (d *Chunk) getPartName(part int) string {
 	return fmt.Sprintf("%d%s", part, d.CustomExt)
+}
+
+// getLinkForChunk implements lazy link acquisition with caching
+func (d *Chunk) getLinkForChunk(ctx context.Context, chunkFile *chunkObject, remoteStorage driver.Driver, chunkPath string, args model.LinkArgs) (*model.Link, model.Obj, error) {
+	partName := stdpath.Base(chunkPath)
+	idx, err := strconv.Atoi(strings.TrimSuffix(partName, d.CustomExt))
+	if err != nil {
+		return op.Link(ctx, remoteStorage, chunkPath, args)
+	}
+
+	if cachedLink, exists := chunkFile.getCachedLink(idx); exists {
+		return cachedLink, nil, nil
+	}
+
+	link, obj, err := op.Link(ctx, remoteStorage, chunkPath, args)
+	if err != nil {
+		return nil, nil, err
+	}
+	
+	chunkFile.setCachedLink(idx, link)
+	return link, obj, nil
+}
+
+// getChunkMetadata retrieves or caches chunk directory metadata
+func (d *Chunk) getChunkMetadata(ctx context.Context, remoteStorage driver.Driver, chunkDirPath string, args model.ListArgs) (*chunkMetadata, error) {
+	if !args.Refresh {
+		if cached, ok := metadataCache.Get(chunkDirPath); ok {
+			if time.Since(cached.CachedAt) < time.Minute*5 {
+				return cached, nil
+			}
+		}
+	}
+
+	chunkObjs, err := op.List(ctx, remoteStorage, chunkDirPath, model.ListArgs{
+		ReqPath: args.ReqPath,
+		Refresh: args.Refresh,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	metadata := &chunkMetadata{
+		Hash:     make(map[*utils.HashType]string),
+		CachedAt: time.Now(),
+	}
+	
+	var firstChunk model.Obj
+	for _, o := range chunkObjs {
+		if o.IsDir() {
+			continue
+		}
+
+		if o.GetName() == "thumbnail.webp" {
+			thumbPath := stdpath.Join(args.ReqPath, stdpath.Base(chunkDirPath), o.GetName())
+			metadata.Thumbnail = fmt.Sprintf("%s/d%s?sign=%s",
+				common.GetApiUrl(ctx),
+				utils.EncodePath(thumbPath, true),
+				sign.Sign(thumbPath))
+			continue
+		}
+
+		if after, ok := strings.CutPrefix(strings.TrimSuffix(o.GetName(), d.CustomExt), "hash_"); ok {
+			hn, value, ok := strings.Cut(after, "_")
+			if ok {
+				if ht, ok := utils.GetHashByName(hn); ok {
+					metadata.Hash[ht] = value
+				}
+			}
+			continue
+		}
+
+		if idx, err := strconv.Atoi(strings.TrimSuffix(o.GetName(), d.CustomExt)); err == nil {
+			if idx == 0 {
+				firstChunk = o
+				metadata.ModTime = o.ModTime()
+				metadata.CreateTime = o.CreateTime()
+			}
+			metadata.TotalSize += o.GetSize()
+		}
+	}
+
+	metadataCache.Set(chunkDirPath, metadata, cache.WithEx[*chunkMetadata](time.Minute*5))
+	return metadata, nil
+}
+
+func (d *Chunk) invalidateMetadataCache(chunkDirPath string) {
+	metadataCache.Del(chunkDirPath)
+}
+
+func (d *Chunk) validatePathAccess(path string) error {
+	if !d.AllowDirectAccess && d.isChunkPath(path) {
+		return fmt.Errorf("direct access to chunk storage is not allowed")
+	}
+	return nil
+}
+
+func (d *Chunk) isChunkPath(path string) bool {
+	return strings.Contains(path, "[openlist_chunk]")
 }
 
 var _ driver.Driver = (*Chunk)(nil)
