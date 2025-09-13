@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OpenListTeam/OpenList/v4/cmd/flags"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
-	"github.com/OpenListTeam/OpenList/v4/internal/fs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/internal/sign"
@@ -20,25 +20,85 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/OpenListTeam/OpenList/v4/server/common"
-	"github.com/OpenListTeam/go-cache"
 )
+
+const (
+	chunkPrefix = "[openlist_chunk]"
+	hashPrefix  = "hash_"
+)
+
+// Shared helper functions to reduce code duplication and improve reusability
+func (d *Chunk) getRemotePath(path string) (driver.Driver, string, error) {
+	remoteStorage, remoteActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
+	if err != nil {
+		return nil, "", err
+	}
+	return remoteStorage, stdpath.Join(remoteActualPath, path), nil
+}
+
+func (d *Chunk) getChunkDirName(fileName string) string {
+	return chunkPrefix + fileName
+}
+
+func (d *Chunk) isChunkDir(name string) (string, bool) {
+	return strings.CutPrefix(name, chunkPrefix)
+}
+
+func (d *Chunk) isHashFile(name string) (string, string, bool) {
+	name = strings.TrimSuffix(name, d.CustomExt)
+	if after, ok := strings.CutPrefix(name, hashPrefix); ok {
+		hn, value, ok := strings.Cut(after, "_")
+		return hn, value, ok
+	}
+	return "", "", false
+}
+
+func (d *Chunk) parseChunkIndex(name string) (int, bool) {
+	idx, err := strconv.Atoi(strings.TrimSuffix(name, d.CustomExt))
+	return idx, err == nil
+}
+
+func (d *Chunk) validateChunkIntegrity(chunkSizes []int64) error {
+	if len(chunkSizes) == 0 {
+		return fmt.Errorf("no chunks found for file")
+	}
+	// Only check chunks up to the second-to-last one (last chunk can be partial)
+	for i := 0; i < len(chunkSizes)-1; i++ {
+		if chunkSizes[i] <= 0 {
+			return fmt.Errorf("chunk part[%d] is missing or has invalid size", i)
+		}
+	}
+	return nil
+}
+
+// logDebug logs debug messages only when debug mode is enabled
+func (d *Chunk) logDebug(format string, args ...interface{}) {
+	if flags.Debug || flags.Dev {
+		utils.Log.Debugf("[chunk] "+format, args...)
+	}
+}
+
+// logError logs error messages with proper context
+func (d *Chunk) logError(err error, context string) {
+	if flags.Debug || flags.Dev {
+		utils.Log.Errorf("[chunk] %s: %+v", context, err)
+	} else {
+		utils.Log.Errorf("[chunk] %s: %v", context, err)
+	}
+}
 
 type Chunk struct {
 	model.Storage
 	Addition
 }
 
-// Chunk metadata cache for performance optimization
 type chunkMetadata struct {
 	TotalSize  int64
 	Hash       map[*utils.HashType]string
-	Thumbnail  string
 	ModTime    time.Time
 	CreateTime time.Time
 	CachedAt   time.Time
 }
-
-var metadataCache = cache.NewMemCache(cache.WithShards[*chunkMetadata](8))
 
 func (d *Chunk) Config() driver.Config {
 	return config
@@ -61,10 +121,6 @@ func (d *Chunk) Drop(ctx context.Context) error {
 }
 
 func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
-	if err := d.validatePathAccess(path); err != nil {
-		return nil, err
-	}
-	
 	if utils.PathEqual(path, "/") {
 		return &model.Object{
 			Name:     "Root",
@@ -72,11 +128,13 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 			Path:     "/",
 		}, nil
 	}
-	remoteStorage, remoteActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
+	
+	remoteStorage, remoteActualPath, err := d.getRemotePath(path)
 	if err != nil {
 		return nil, err
 	}
-	remoteActualPath = stdpath.Join(remoteActualPath, path)
+	
+	// Try to get as regular file first
 	if remoteObj, err := op.Get(ctx, remoteStorage, remoteActualPath); err == nil {
 		return &model.Object{
 			Path:     path,
@@ -88,61 +146,83 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 		}, nil
 	}
 
+	// Try as chunked file
 	remoteActualDir, name := stdpath.Split(remoteActualPath)
-	chunkName := "[openlist_chunk]" + name
-	chunkObjs, err := op.List(ctx, remoteStorage, stdpath.Join(remoteActualDir, chunkName), model.ListArgs{})
+	chunkDirPath := stdpath.Join(remoteActualDir, d.getChunkDirName(name))
+	
+	chunkObjs, err := op.List(ctx, remoteStorage, chunkDirPath, model.ListArgs{})
 	if err != nil {
 		return nil, err
 	}
-	var totalSize int64 = 0
-	chunkSizes := []int64{-1}
+	
+	return d.buildChunkObject(chunkObjs, path, name)
+}
+
+// buildChunkObject processes chunk objects and builds a chunkObject
+func (d *Chunk) buildChunkObject(chunkObjs []model.Obj, path, name string) (*chunkObject, error) {
+	var totalSize int64
 	h := make(map[*utils.HashType]string)
 	var first model.Obj
+	
+	// Pre-scan to find max chunk index for efficient allocation
+	maxIdx := -1
 	for _, o := range chunkObjs {
 		if o.IsDir() {
 			continue
 		}
-		if after, ok := strings.CutPrefix(o.GetName(), "hash_"); ok {
-			hn, value, ok := strings.Cut(strings.TrimSuffix(after, d.CustomExt), "_")
-			if ok {
-				ht, ok := utils.GetHashByName(hn)
-				if ok {
-					h[ht] = value
-				}
+		
+		// Skip hash files in first pass
+		if _, _, ok := d.isHashFile(o.GetName()); ok {
+			continue
+		}
+		
+		if idx, ok := d.parseChunkIndex(o.GetName()); ok && idx > maxIdx {
+			maxIdx = idx
+		}
+	}
+	
+	if maxIdx < 0 {
+		return nil, fmt.Errorf("no valid chunk files found")
+	}
+	
+	// Allocate chunkSizes array with known size
+	chunkSizes := make([]int64, maxIdx+1)
+	for i := range chunkSizes {
+		chunkSizes[i] = -1 // Mark as missing
+	}
+	
+	// Second pass to fill data
+	for _, o := range chunkObjs {
+		if o.IsDir() {
+			continue
+		}
+		
+		// Process hash files
+		if hn, value, ok := d.isHashFile(o.GetName()); ok {
+			if ht, ok := utils.GetHashByName(hn); ok {
+				h[ht] = value
 			}
 			continue
 		}
-		idx, err := strconv.Atoi(strings.TrimSuffix(o.GetName(), d.CustomExt))
-		if err != nil {
-			continue
-		}
-		totalSize += o.GetSize()
-		if len(chunkSizes) > idx {
+		
+		// Process chunk files
+		if idx, ok := d.parseChunkIndex(o.GetName()); ok {
+			totalSize += o.GetSize()
 			if idx == 0 {
 				first = o
 			}
 			chunkSizes[idx] = o.GetSize()
-		} else if len(chunkSizes) == idx {
-			chunkSizes = append(chunkSizes, o.GetSize())
-		} else {
-			newChunkSizes := make([]int64, idx+1)
-			copy(newChunkSizes, chunkSizes)
-			chunkSizes = newChunkSizes
-			chunkSizes[idx] = o.GetSize()
 		}
 	}
-	if len(chunkSizes) == 0 {
-		return nil, fmt.Errorf("no chunks found")
+	
+	if err := d.validateChunkIntegrity(chunkSizes); err != nil {
+		return nil, err
 	}
-	for i := 0; i < len(chunkSizes); i++ {
-		if chunkSizes[i] <= 0 {
-			return nil, fmt.Errorf("chunk part[%d] are missing", i)
-		}
-	}
+	
 	reqDir, _ := stdpath.Split(path)
 	objRes := chunkObject{
 		Object: model.Object{
-			Path:     stdpath.Join(reqDir, chunkName),
+			Path:     stdpath.Join(reqDir, d.getChunkDirName(name)),
 			Name:     name,
 			Size:     totalSize,
 			Modified: first.ModTime(),
@@ -150,18 +230,19 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 		},
 		chunkSizes: chunkSizes,
 	}
+	
 	if len(h) > 0 {
 		objRes.HashInfo = utils.NewHashInfoByMap(h)
 	}
+	
 	return &objRes, nil
 }
-
 func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
-	remoteStorage, remoteActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
+	remoteStorage, remoteActualDir, err := d.getRemotePath(dir.GetPath())
 	if err != nil {
 		return nil, err
 	}
-	remoteActualDir := stdpath.Join(remoteActualPath, dir.GetPath())
+	
 	remoteObjs, err := op.List(ctx, remoteStorage, remoteActualDir, model.ListArgs{
 		ReqPath: args.ReqPath,
 		Refresh: args.Refresh,
@@ -169,69 +250,109 @@ func (d *Chunk) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 	if err != nil {
 		return nil, err
 	}
-	return utils.SliceConvert(remoteObjs, func(obj model.Obj) (model.Obj, error) {
+	
+	result := make([]model.Obj, 0, len(remoteObjs))
+	for _, obj := range remoteObjs {
 		rawName := obj.GetName()
+		
+		// Process chunk directories
 		if obj.IsDir() {
-			if name, ok := strings.CutPrefix(rawName, "[openlist_chunk]"); ok {
-				chunkDirPath := stdpath.Join(remoteActualDir, rawName)
-				metadata, err := d.getChunkMetadata(ctx, remoteStorage, chunkDirPath, args)
-				if err != nil {
-					return nil, err
+			if name, ok := d.isChunkDir(rawName); ok {
+				if chunkObj, err := d.processChunkDir(ctx, remoteStorage, remoteActualDir, rawName, name, args); err == nil {
+					result = append(result, chunkObj)
+				} else {
+					d.logDebug("skipping invalid chunk directory %s", rawName)
 				}
-				
-				objRes := model.Object{
-					Name:     name,
-					Size:     metadata.TotalSize,
-					Modified: metadata.ModTime,
-					Ctime:    metadata.CreateTime,
-				}
-				if len(metadata.Hash) > 0 {
-					objRes.HashInfo = utils.NewHashInfoByMap(metadata.Hash)
-				}
-				if metadata.Thumbnail == "" {
-					return &objRes, nil
-				}
-				return &model.ObjThumb{
-					Object: objRes,
-					Thumbnail: model.Thumbnail{
-						Thumbnail: metadata.Thumbnail,
-					},
-				}, nil
+				continue
 			}
 		}
-
-		if !d.AllowDirectAccess && strings.HasPrefix(rawName, "[openlist_chunk]") {
-			return nil, nil // Skip this object
+		
+		// Skip other chunk-related files
+		if strings.HasPrefix(rawName, chunkPrefix) {
+			continue
 		}
 
-		thumb, ok := model.GetThumb(obj)
-		objRes := model.Object{
-			Name:     rawName,
-			Size:     obj.GetSize(),
-			Modified: obj.ModTime(),
-			IsFolder: obj.IsDir(),
-			HashInfo: obj.GetHash(),
+		// Skip hidden files if configured
+		if !d.ShowHidden && strings.HasPrefix(rawName, ".") {
+			continue
 		}
-		if !ok {
-			return &objRes, nil
-		}
+		
+		// Add regular files/directories
+		result = append(result, d.createRegularObject(obj))
+	}
+	
+	return result, nil
+}
+
+// processChunkDir handles chunk directory processing with error recovery
+func (d *Chunk) processChunkDir(ctx context.Context, remoteStorage driver.Driver, remoteActualDir, rawName, name string, args model.ListArgs) (model.Obj, error) {
+	chunkDirPath := stdpath.Join(remoteActualDir, rawName)
+	metadata, err := d.getChunkMetadata(ctx, remoteStorage, chunkDirPath, args)
+	if err != nil {
+		d.logDebug("failed to get chunk metadata for %s: %v", name, err)
+		return nil, err
+	}
+	
+	objRes := model.Object{
+		Name:     name,
+		Size:     metadata.TotalSize,
+		Modified: metadata.ModTime,
+		Ctime:    metadata.CreateTime,
+	}
+	
+	if len(metadata.Hash) > 0 {
+		objRes.HashInfo = utils.NewHashInfoByMap(metadata.Hash)
+	}
+	
+	if !d.Thumbnail {
+		return &objRes, nil
+	}
+	
+	// Create thumbnail object with reused path generation
+	thumbPath := stdpath.Join(args.ReqPath, ".thumbnails", name+".webp")
+	thumb := fmt.Sprintf("%s/d%s?sign=%s",
+		common.GetApiUrl(ctx),
+		utils.EncodePath(thumbPath, true),
+		sign.Sign(thumbPath))
+	
+	return &model.ObjThumb{
+		Object: objRes,
+		Thumbnail: model.Thumbnail{
+			Thumbnail: thumb,
+		},
+	}, nil
+}
+
+// createRegularObject efficiently creates standard file/directory objects
+func (d *Chunk) createRegularObject(obj model.Obj) model.Obj {
+	objRes := model.Object{
+		Name:     obj.GetName(),
+		Size:     obj.GetSize(),
+		Modified: obj.ModTime(),
+		IsFolder: obj.IsDir(),
+		HashInfo: obj.GetHash(),
+	}
+	
+	if thumb, ok := model.GetThumb(obj); ok {
 		return &model.ObjThumb{
 			Object: objRes,
 			Thumbnail: model.Thumbnail{
 				Thumbnail: thumb,
 			},
-		}, nil
-	})
+		}
+	}
+	
+	return &objRes
 }
-
 func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
-	remoteStorage, remoteActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
+	remoteStorage, remoteActualPath, err := d.getRemotePath(file.GetPath())
 	if err != nil {
 		return nil, err
 	}
+	
 	chunkFile, ok := file.(*chunkObject)
-	remoteActualPath = stdpath.Join(remoteActualPath, file.GetPath())
 	if !ok {
+		// Regular file, use standard link
 		l, _, err := op.Link(ctx, remoteStorage, remoteActualPath, args)
 		if err != nil {
 			return nil, err
@@ -240,8 +361,19 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 		resultLink.SyncClosers = utils.NewSyncClosers(l)
 		return &resultLink, nil
 	}
+	
+	// Chunk file: create merged range reader
 	fileSize := chunkFile.GetSize()
-	mergedRrf := func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
+	mergedRrf := d.createMergedRangeReader(ctx, chunkFile, remoteStorage, remoteActualPath, args, fileSize)
+	
+	return &model.Link{
+		RangeReader: stream.RangeReaderFunc(mergedRrf),
+	}, nil
+}
+
+// createMergedRangeReader creates a range reader that merges multiple chunks
+func (d *Chunk) createMergedRangeReader(ctx context.Context, chunkFile *chunkObject, remoteStorage driver.Driver, remoteActualPath string, args model.LinkArgs, fileSize int64) func(context.Context, http_range.Range) (io.ReadCloser, error) {
+	return func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
 		start := httpRange.Start
 		length := httpRange.Length
 		if length < 0 || start+length > fileSize {
@@ -250,277 +382,287 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 		if length == 0 {
 			return io.NopCloser(strings.NewReader("")), nil
 		}
+		
 		rs := make([]io.Reader, 0)
 		cs := make(utils.Closers, 0)
-		var (
-			rc       io.ReadCloser
-			readFrom bool
-		)
+		var readFrom bool
+		
 		for idx, chunkSize := range chunkFile.chunkSizes {
 			if readFrom {
-				l, o, err := d.getLinkForChunk(ctx, chunkFile, remoteStorage, stdpath.Join(remoteActualPath, d.getPartName(idx)), args)
-				if err != nil {
+				if newLength, reader, err := d.processReadingChunk(ctx, chunkFile, remoteStorage, remoteActualPath, args, idx, chunkSize, length, &cs); err != nil {
 					_ = cs.Close()
 					return nil, err
-				}
-				cs = append(cs, l)
-				chunkSize2 := l.ContentLength
-				if chunkSize2 <= 0 {
-					chunkSize2 = o.GetSize()
-				}
-				if chunkSize2 != chunkSize {
-					_ = cs.Close()
-					return nil, fmt.Errorf("chunk part[%d] size not match", idx)
-				}
-				rrf, err := stream.GetRangeReaderFromLink(chunkSize2, l)
-				if err != nil {
-					_ = cs.Close()
-					return nil, err
-				}
-				newLength := length - chunkSize2
-				if newLength >= 0 {
-					length = newLength
-					rc, err = rrf.RangeRead(ctx, http_range.Range{Length: -1})
 				} else {
-					rc, err = rrf.RangeRead(ctx, http_range.Range{Length: length})
-				}
-				if err != nil {
-					_ = cs.Close()
-					return nil, err
-				}
-				rs = append(rs, rc)
-				cs = append(cs, rc)
-				if newLength <= 0 {
-					return utils.ReadCloser{
-						Reader: io.MultiReader(rs...),
-						Closer: &cs,
-					}, nil
+					rs = append(rs, reader)
+					cs = append(cs, reader)
+					if newLength <= 0 {
+						return utils.ReadCloser{
+							Reader: io.MultiReader(rs...),
+							Closer: &cs,
+						}, nil
+					}
+					length = newLength
 				}
 			} else if newStart := start - chunkSize; newStart >= 0 {
 				start = newStart
 			} else {
-				l, o, err := d.getLinkForChunk(ctx, chunkFile, remoteStorage, stdpath.Join(remoteActualPath, d.getPartName(idx)), args)
-				if err != nil {
+				if newLength, reader, err := d.processStartingChunk(ctx, chunkFile, remoteStorage, remoteActualPath, args, idx, chunkSize, start, length, &cs); err != nil {
 					_ = cs.Close()
 					return nil, err
+				} else {
+					length = newLength
+					cs = append(cs, reader)
+					if length <= 0 {
+						return utils.ReadCloser{
+							Reader: reader,
+							Closer: &cs,
+						}, nil
+					}
+					rs = append(rs, reader)
+					readFrom = true
 				}
-				cs = append(cs, l)
-				chunkSize2 := l.ContentLength
-				if chunkSize2 <= 0 {
-					chunkSize2 = o.GetSize()
-				}
-				if chunkSize2 != chunkSize {
-					_ = cs.Close()
-					return nil, fmt.Errorf("chunk part[%d] size not match", idx)
-				}
-				rrf, err := stream.GetRangeReaderFromLink(chunkSize2, l)
-				if err != nil {
-					_ = cs.Close()
-					return nil, err
-				}
-				rc, err = rrf.RangeRead(ctx, http_range.Range{Start: start, Length: -1})
-				if err != nil {
-					_ = cs.Close()
-					return nil, err
-				}
-				length -= chunkSize2 - start
-				cs = append(cs, rc)
-				if length <= 0 {
-					return utils.ReadCloser{
-						Reader: rc,
-						Closer: &cs,
-					}, nil
-				}
-				rs = append(rs, rc)
-				readFrom = true
 			}
 		}
 		return nil, fmt.Errorf("invalid range: start=%d,length=%d,fileSize=%d", httpRange.Start, httpRange.Length, fileSize)
 	}
-	return &model.Link{
-		RangeReader: stream.RangeReaderFunc(mergedRrf),
-	}, nil
+}
+
+// processReadingChunk processes a chunk when already reading
+func (d *Chunk) processReadingChunk(ctx context.Context, chunkFile *chunkObject, remoteStorage driver.Driver, remoteActualPath string, args model.LinkArgs, idx int, chunkSize, length int64, cs *utils.Closers) (int64, io.ReadCloser, error) {
+	l, o, err := d.getLinkForChunk(ctx, chunkFile, remoteStorage, stdpath.Join(remoteActualPath, d.getPartName(idx)), args)
+	if err != nil {
+		d.logDebug("failed to get link for chunk %d: %v", idx, err)
+		return 0, nil, err
+	}
+	*cs = append(*cs, l)
+	
+	chunkSize2 := l.ContentLength
+	if chunkSize2 <= 0 {
+		chunkSize2 = o.GetSize()
+	}
+	if chunkSize2 != chunkSize {
+		return 0, nil, fmt.Errorf("chunk part[%d] size not match", idx)
+	}
+	
+	rrf, err := stream.GetRangeReaderFromLink(chunkSize2, l)
+	if err != nil {
+		d.logDebug("failed to create range reader for chunk %d: %v", idx, err)
+		return 0, nil, err
+	}
+	
+	newLength := length - chunkSize2
+	var rc io.ReadCloser
+	if newLength >= 0 {
+		rc, err = rrf.RangeRead(ctx, http_range.Range{Length: -1})
+	} else {
+		rc, err = rrf.RangeRead(ctx, http_range.Range{Length: length})
+	}
+	
+	if err != nil {
+		d.logDebug("failed to read range for chunk %d: %v", idx, err)
+	}
+	
+	return newLength, rc, err
+}
+
+// processStartingChunk processes the first chunk in a range
+func (d *Chunk) processStartingChunk(ctx context.Context, chunkFile *chunkObject, remoteStorage driver.Driver, remoteActualPath string, args model.LinkArgs, idx int, chunkSize, start, length int64, cs *utils.Closers) (int64, io.ReadCloser, error) {
+	l, o, err := d.getLinkForChunk(ctx, chunkFile, remoteStorage, stdpath.Join(remoteActualPath, d.getPartName(idx)), args)
+	if err != nil {
+		d.logDebug("failed to get link for starting chunk %d: %v", idx, err)
+		return 0, nil, err
+	}
+	*cs = append(*cs, l)
+	
+	chunkSize2 := l.ContentLength
+	if chunkSize2 <= 0 {
+		chunkSize2 = o.GetSize()
+	}
+	if chunkSize2 != chunkSize {
+		return 0, nil, fmt.Errorf("chunk part[%d] size not match", idx)
+	}
+	
+	rrf, err := stream.GetRangeReaderFromLink(chunkSize2, l)
+	if err != nil {
+		d.logDebug("failed to create range reader for starting chunk %d: %v", idx, err)
+		return 0, nil, err
+	}
+	
+	rc, err := rrf.RangeRead(ctx, http_range.Range{Start: start, Length: -1})
+	if err != nil {
+		d.logDebug("failed to read range for starting chunk %d: %v", idx, err)
+		return 0, nil, err
+	}
+	
+	newLength := length - (chunkSize2 - start)
+	return newLength, rc, nil
 }
 
 func (d *Chunk) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {
-	path := stdpath.Join(d.RemotePath, parentDir.GetPath(), dirName)
-	return fs.MakeDir(ctx, path)
+	remoteStorage, targetPath, err := d.getRemotePath(stdpath.Join(parentDir.GetPath(), dirName))
+	if err != nil {
+		return err
+	}
+	return op.MakeDir(ctx, remoteStorage, targetPath)
 }
 
 func (d *Chunk) Move(ctx context.Context, srcObj, dstDir model.Obj) error {
-	chunkObj, ok := srcObj.(*chunkObject)
-	if !ok {
-		src := stdpath.Join(d.RemotePath, srcObj.GetPath())
-		dst := stdpath.Join(d.RemotePath, dstDir.GetPath())
-		_, err := fs.Move(ctx, src, dst)
-		return err
-	}
-
-	srcPath := stdpath.Join(d.RemotePath, chunkObj.GetPath())
-	dstPath := stdpath.Join(d.RemotePath, dstDir.GetPath())
-	
-	_, err := fs.Move(ctx, srcPath, dstPath)
+	remoteStorage, srcPath, err := d.getRemotePath(srcObj.GetPath())
 	if err != nil {
 		return err
 	}
-
-	d.invalidateMetadataCache(srcPath)
-	d.invalidateMetadataCache(dstPath)
-	return nil
+	_, dstPath, err := d.getRemotePath(dstDir.GetPath())
+	if err != nil {
+		return err
+	}
+	return op.Move(ctx, remoteStorage, srcPath, dstPath)
 }
 
 func (d *Chunk) Rename(ctx context.Context, srcObj model.Obj, newName string) error {
-	chunkObj, ok := srcObj.(*chunkObject)
-	if !ok {
-		return fs.Rename(ctx, stdpath.Join(d.RemotePath, srcObj.GetPath()), newName)
-	}
-	
-	// Atomic rename operation for chunk directories
-	oldPath := stdpath.Join(d.RemotePath, chunkObj.GetPath())
-	parentDir := stdpath.Dir(oldPath)
-	newPath := stdpath.Join(parentDir, "[openlist_chunk]"+newName)
-	
-	err := fs.Rename(ctx, oldPath, stdpath.Base(newPath))
+	remoteStorage, srcPath, err := d.getRemotePath(srcObj.GetPath())
 	if err != nil {
 		return err
 	}
-
-	d.invalidateMetadataCache(oldPath)
-	d.invalidateMetadataCache(newPath)
-	return nil
+	
+	if _, ok := srcObj.(*chunkObject); !ok {
+		return op.Rename(ctx, remoteStorage, srcPath, newName)
+	}
+	
+	// Chunk files are stored in prefixed directories
+	return op.Rename(ctx, remoteStorage, srcPath, d.getChunkDirName(newName))
 }
 
 func (d *Chunk) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
-	dst := stdpath.Join(d.RemotePath, dstDir.GetPath())
-	src := stdpath.Join(d.RemotePath, srcObj.GetPath())
-	_, err := fs.Copy(ctx, src, dst)
-	return err
+	remoteStorage, srcPath, err := d.getRemotePath(srcObj.GetPath())
+	if err != nil {
+		return err
+	}
+	_, dstPath, err := d.getRemotePath(dstDir.GetPath())
+	if err != nil {
+		return err
+	}
+	return op.Copy(ctx, remoteStorage, srcPath, dstPath)
 }
 
 func (d *Chunk) Remove(ctx context.Context, obj model.Obj) error {
-	path := stdpath.Join(d.RemotePath, obj.GetPath())
-	err := fs.Remove(ctx, path)
+	remoteStorage, targetPath, err := d.getRemotePath(obj.GetPath())
 	if err != nil {
 		return err
 	}
-	
-	// Invalidate cache for chunk objects
-	if chunkObj, ok := obj.(*chunkObject); ok {
-		d.invalidateMetadataCache(stdpath.Join(d.RemotePath, chunkObj.GetPath()))
-	}
-	
-	return nil
+	return op.Remove(ctx, remoteStorage, targetPath)
 }
 
 func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) error {
-	remoteStorage, remoteActualPath, err := op.GetStorageAndActualPath(d.RemotePath)
+	remoteStorage, dstPath, err := d.getRemotePath(dstDir.GetPath())
 	if err != nil {
 		return err
 	}
+	
+	// Handle thumbnail uploads directly
+	if d.Thumbnail && dstDir.GetName() == ".thumbnails" {
+		return op.Put(ctx, remoteStorage, dstPath, file, up)
+	}
+	
 	upReader := &driver.ReaderUpdatingProgress{
 		Reader:         file,
 		UpdateProgress: up,
 	}
-	dst := stdpath.Join(remoteActualPath, dstDir.GetPath(), "[openlist_chunk]"+file.GetName())
+	
+	chunkDirPath := stdpath.Join(dstPath, d.getChunkDirName(file.GetName()))
+	
+	// Store hash files if enabled
 	if d.StoreHash {
-		for ht, value := range file.GetHash().All() {
-			_ = op.Put(ctx, remoteStorage, dst, &stream.FileStream{
-				Obj: &model.Object{
-					Name:     fmt.Sprintf("hash_%s_%s%s", ht.Name, value, d.CustomExt),
-					Size:     1,
-					Modified: file.ModTime(),
-				},
-				Mimetype: "application/octet-stream",
-				Reader:   bytes.NewReader([]byte{0}), // 兼容不支持空文件的驱动
-			}, nil, true)
+		if err := d.storeHashFiles(ctx, remoteStorage, chunkDirPath, file); err != nil {
+			d.logDebug("failed to store hash files: %v", err)
+			// Continue without hash files as it's not critical
 		}
 	}
-	fullPartCount := int(file.GetSize() / d.PartSize)
-	tailSize := file.GetSize() % d.PartSize
+	
+	// Upload chunk parts
+	return d.uploadChunkParts(ctx, remoteStorage, chunkDirPath, file, upReader)
+}
+
+// storeHashFiles stores hash files for the uploaded file
+func (d *Chunk) storeHashFiles(ctx context.Context, remoteStorage driver.Driver, chunkDirPath string, file model.FileStreamer) error {
+	for ht, value := range file.GetHash().All() {
+		hashFileName := fmt.Sprintf("%s%s_%s%s", hashPrefix, ht.Name, value, d.CustomExt)
+		err := op.Put(ctx, remoteStorage, chunkDirPath, &stream.FileStream{
+			Obj: &model.Object{
+				Name:     hashFileName,
+				Size:     1,
+				Modified: file.ModTime(),
+			},
+			Mimetype: "application/octet-stream",
+			Reader:   bytes.NewReader([]byte{0}), // Compatible with drivers that don't support empty files
+		}, nil, true)
+		if err != nil {
+			d.logDebug("failed to store hash file %s: %v", hashFileName, err)
+			// Continue with other hash files
+		}
+	}
+	return nil
+}
+
+// uploadChunkParts uploads all file chunks with proper error handling
+func (d *Chunk) uploadChunkParts(ctx context.Context, remoteStorage driver.Driver, chunkDirPath string, file model.FileStreamer, upReader io.Reader) error {
+	fileSize := file.GetSize()
+	fullPartCount := int(fileSize / d.PartSize)
+	tailSize := fileSize % d.PartSize
+	
+	// Adjust for files that end exactly on chunk boundary
 	if tailSize == 0 && fullPartCount > 0 {
 		fullPartCount--
 		tailSize = d.PartSize
-	}	
-	var uploadedParts []string
-	partIndex := 0
-	for partIndex < fullPartCount {
-		partName := d.getPartName(partIndex)
-		err := op.Put(ctx, remoteStorage, dst, &stream.FileStream{
-			Obj: &model.Object{
-				Name:     partName,
-				Size:     d.PartSize,
-				Modified: file.ModTime(),
-			},
-			Mimetype: file.GetMimetype(),
-			Reader:   io.LimitReader(upReader, d.PartSize),
-		}, nil, true)
-		if err != nil {
-			for _, uploadedPart := range uploadedParts {
-				_ = op.Remove(ctx, remoteStorage, stdpath.Join(dst, uploadedPart))
-			}
-			return fmt.Errorf("failed to upload chunk %d: %w", partIndex, err)
-		}
-		uploadedParts = append(uploadedParts, partName)
-		partIndex++
 	}
-	finalPartName := d.getPartName(fullPartCount)
-	err = op.Put(ctx, remoteStorage, dst, &stream.FileStream{
+	
+	// Use helper function to reduce code duplication
+	cleanupOnError := func(err error) error {
+		_ = op.Remove(ctx, remoteStorage, chunkDirPath)
+		return err
+	}
+	
+	// Upload full-size chunks
+	for partIndex := 0; partIndex < fullPartCount; partIndex++ {
+		if err := d.uploadSingleChunk(ctx, remoteStorage, chunkDirPath, file, upReader, partIndex, d.PartSize); err != nil {
+			d.logError(err, fmt.Sprintf("upload chunk %d", partIndex))
+			return cleanupOnError(fmt.Errorf("failed to upload chunk %d: %w", partIndex, err))
+		}
+	}
+	
+	// Upload final chunk (may be smaller)
+	if err := d.uploadSingleChunk(ctx, remoteStorage, chunkDirPath, file, upReader, fullPartCount, tailSize); err != nil {
+		d.logError(err, "upload final chunk")
+		return cleanupOnError(fmt.Errorf("failed to upload final chunk: %w", err))
+	}
+	
+	return nil
+}
+
+// uploadSingleChunk uploads a single chunk
+func (d *Chunk) uploadSingleChunk(ctx context.Context, remoteStorage driver.Driver, chunkDirPath string, file model.FileStreamer, upReader io.Reader, partIndex int, chunkSize int64) error {
+	partName := d.getPartName(partIndex)
+	return op.Put(ctx, remoteStorage, chunkDirPath, &stream.FileStream{
 		Obj: &model.Object{
-			Name:     finalPartName,
-			Size:     tailSize,
+			Name:     partName,
+			Size:     chunkSize,
 			Modified: file.ModTime(),
 		},
 		Mimetype: file.GetMimetype(),
-		Reader:   upReader,
-	}, nil)
-	if err != nil {
-		for _, uploadedPart := range uploadedParts {
-			_ = op.Remove(ctx, remoteStorage, stdpath.Join(dst, uploadedPart))
-		}
-		return fmt.Errorf("failed to upload final chunk: %w", err)
-	}
-	
-	// Invalidate cache after successful upload
-	d.invalidateMetadataCache(dst)
-	
-	return nil
+		Reader:   io.LimitReader(upReader, chunkSize),
+	}, nil, true)
 }
 
 func (d *Chunk) getPartName(part int) string {
 	return fmt.Sprintf("%d%s", part, d.CustomExt)
 }
 
-// getLinkForChunk implements lazy link acquisition with caching
+// getLinkForChunk directly uses op.Link for caching
 func (d *Chunk) getLinkForChunk(ctx context.Context, chunkFile *chunkObject, remoteStorage driver.Driver, chunkPath string, args model.LinkArgs) (*model.Link, model.Obj, error) {
-	partName := stdpath.Base(chunkPath)
-	idx, err := strconv.Atoi(strings.TrimSuffix(partName, d.CustomExt))
-	if err != nil {
-		return op.Link(ctx, remoteStorage, chunkPath, args)
-	}
-
-	if cachedLink, exists := chunkFile.getCachedLink(idx); exists {
-		return cachedLink, nil, nil
-	}
-
-	link, obj, err := op.Link(ctx, remoteStorage, chunkPath, args)
-	if err != nil {
-		return nil, nil, err
-	}
-	
-	chunkFile.setCachedLink(idx, link)
-	return link, obj, nil
+	return op.Link(ctx, remoteStorage, chunkPath, args)
 }
 
-// getChunkMetadata retrieves or caches chunk directory metadata
+// getChunkMetadata retrieves chunk directory metadata efficiently
 func (d *Chunk) getChunkMetadata(ctx context.Context, remoteStorage driver.Driver, chunkDirPath string, args model.ListArgs) (*chunkMetadata, error) {
-	if !args.Refresh {
-		if cached, ok := metadataCache.Get(chunkDirPath); ok {
-			if time.Since(cached.CachedAt) < time.Minute*5 {
-				return cached, nil
-			}
-		}
-	}
-
 	chunkObjs, err := op.List(ctx, remoteStorage, chunkDirPath, model.ListArgs{
 		ReqPath: args.ReqPath,
 		Refresh: args.Refresh,
@@ -534,34 +676,22 @@ func (d *Chunk) getChunkMetadata(ctx context.Context, remoteStorage driver.Drive
 		CachedAt: time.Now(),
 	}
 	
-	var firstChunk model.Obj
 	for _, o := range chunkObjs {
 		if o.IsDir() {
 			continue
 		}
 
-		if o.GetName() == "thumbnail.webp" {
-			thumbPath := stdpath.Join(args.ReqPath, stdpath.Base(chunkDirPath), o.GetName())
-			metadata.Thumbnail = fmt.Sprintf("%s/d%s?sign=%s",
-				common.GetApiUrl(ctx),
-				utils.EncodePath(thumbPath, true),
-				sign.Sign(thumbPath))
-			continue
-		}
-
-		if after, ok := strings.CutPrefix(strings.TrimSuffix(o.GetName(), d.CustomExt), "hash_"); ok {
-			hn, value, ok := strings.Cut(after, "_")
-			if ok {
-				if ht, ok := utils.GetHashByName(hn); ok {
-					metadata.Hash[ht] = value
-				}
+		// Process hash files
+		if hn, value, ok := d.isHashFile(o.GetName()); ok {
+			if ht, ok := utils.GetHashByName(hn); ok {
+				metadata.Hash[ht] = value
 			}
 			continue
 		}
 
-		if idx, err := strconv.Atoi(strings.TrimSuffix(o.GetName(), d.CustomExt)); err == nil {
+		// Process chunk files
+		if idx, ok := d.parseChunkIndex(o.GetName()); ok {
 			if idx == 0 {
-				firstChunk = o
 				metadata.ModTime = o.ModTime()
 				metadata.CreateTime = o.CreateTime()
 			}
@@ -569,23 +699,7 @@ func (d *Chunk) getChunkMetadata(ctx context.Context, remoteStorage driver.Drive
 		}
 	}
 
-	metadataCache.Set(chunkDirPath, metadata, cache.WithEx[*chunkMetadata](time.Minute*5))
 	return metadata, nil
-}
-
-func (d *Chunk) invalidateMetadataCache(chunkDirPath string) {
-	metadataCache.Del(chunkDirPath)
-}
-
-func (d *Chunk) validatePathAccess(path string) error {
-	if !d.AllowDirectAccess && d.isChunkPath(path) {
-		return fmt.Errorf("direct access to chunk storage is not allowed")
-	}
-	return nil
-}
-
-func (d *Chunk) isChunkPath(path string) bool {
-	return strings.Contains(path, "[openlist_chunk]")
 }
 
 var _ driver.Driver = (*Chunk)(nil)
