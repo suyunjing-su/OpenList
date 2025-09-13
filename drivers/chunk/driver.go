@@ -113,12 +113,12 @@ func (d *Chunk) Get(ctx context.Context, path string) (model.Obj, error) {
 			chunkSizes[idx] = o.GetSize()
 		}
 	}
-	for i, l := 0, len(chunkSizes)-2; ; i++ {
-		if (i == 0 && chunkSizes[i] == -1) || chunkSizes[i] == 0 {
+	if len(chunkSizes) == 0 {
+		return nil, fmt.Errorf("no chunks found")
+	}
+	for i := 0; i < len(chunkSizes); i++ {
+		if chunkSizes[i] <= 0 {
 			return nil, fmt.Errorf("chunk part[%d] are missing", i)
-		}
-		if i >= l {
-			break
 		}
 	}
 	reqDir, _ := stdpath.Split(path)
@@ -333,6 +333,7 @@ func (d *Chunk) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 				}
 				rc, err = rrf.RangeRead(ctx, http_range.Range{Start: start, Length: -1})
 				if err != nil {
+					_ = cs.Close()
 					return nil, err
 				}
 				length -= chunkSize2 - start
@@ -413,29 +414,47 @@ func (d *Chunk) Put(ctx context.Context, dstDir model.Obj, file model.FileStream
 	if tailSize == 0 && fullPartCount > 0 {
 		fullPartCount--
 		tailSize = d.PartSize
-	}
+	}	
+	var uploadedParts []string
 	partIndex := 0
 	for partIndex < fullPartCount {
-		err = errors.Join(err, op.Put(ctx, remoteStorage, dst, &stream.FileStream{
+		partName := d.getPartName(partIndex)
+		err := op.Put(ctx, remoteStorage, dst, &stream.FileStream{
 			Obj: &model.Object{
-				Name:     d.getPartName(partIndex),
+				Name:     partName,
 				Size:     d.PartSize,
 				Modified: file.ModTime(),
 			},
 			Mimetype: file.GetMimetype(),
 			Reader:   io.LimitReader(upReader, d.PartSize),
-		}, nil, true))
+		}, nil, true)
+		if err != nil {
+			for _, uploadedPart := range uploadedParts {
+				_ = op.Remove(ctx, remoteStorage, stdpath.Join(dst, uploadedPart))
+			}
+			return fmt.Errorf("failed to upload chunk %d: %w", partIndex, err)
+		}
+		uploadedParts = append(uploadedParts, partName)
 		partIndex++
 	}
-	return errors.Join(err, op.Put(ctx, remoteStorage, dst, &stream.FileStream{
+	finalPartName := d.getPartName(fullPartCount)
+	err = op.Put(ctx, remoteStorage, dst, &stream.FileStream{
 		Obj: &model.Object{
-			Name:     d.getPartName(fullPartCount),
+			Name:     finalPartName,
 			Size:     tailSize,
 			Modified: file.ModTime(),
 		},
 		Mimetype: file.GetMimetype(),
 		Reader:   upReader,
-	}, nil))
+	}, nil)
+	if err != nil {
+		for _, uploadedPart := range uploadedParts {
+			_ = op.Remove(ctx, remoteStorage, stdpath.Join(dst, uploadedPart))
+		}
+		return fmt.Errorf("failed to upload final chunk: %w", err)
+	}
+	
+	return nil
 }
 
 func (d *Chunk) getPartName(part int) string {
