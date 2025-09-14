@@ -6,6 +6,9 @@ Author: Da3zKi7<da3zki7@duck.com>
 Date: 2025-09-11
 
 D@' 3z K!7 - The King Of Cracking
+
+Modifications by ILoveScratch2<ilovescratch@foxmail.com>
+Date: 2025-09-14
 */
 
 import (
@@ -331,7 +334,7 @@ func (d *Mediafire) Put(ctx context.Context, dstDir model.Obj, file model.FileSt
 
 func (d *Mediafire) PutResult(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
 
-	tempFile, err := file.CacheFullInTempFile()
+	tempFile, err := file.CacheFullAndWriter(&up, nil)
 	if err != nil {
 		return nil, err
 	}

@@ -6,6 +6,9 @@ Author: Da3zKi7<da3zki7@duck.com>
 Date: 2025-09-11
 
 D@' 3z K!7 - The King Of Cracking
+
+Modifications by ILoveScratch2<ilovescratch@foxmail.com>
+Date: 2025-09-14
 */
 
 import (
@@ -28,7 +31,7 @@ type Addition struct {
 var config = driver.Config{
 	Name:              "MediaFire",
 	LocalSort:         false,
-	OnlyLocal:         false,
+	OnlyLinkMFile:     false,
 	OnlyProxy:         false,
 	NoCache:           false,
 	NoUpload:          false,
