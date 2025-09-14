@@ -338,7 +338,6 @@ func (d *Mediafire) PutResult(ctx context.Context, dstDir model.Obj, file model.
 	if err != nil {
 		return nil, err
 	}
-	defer tempFile.Close()
 
 	osFile, ok := tempFile.(*os.File)
 	if !ok {
