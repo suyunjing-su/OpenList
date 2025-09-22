@@ -352,17 +352,6 @@ func (d *Mediafire) getDirectDownloadLink(_ context.Context, fileID string) (str
 	return resp.Response.Links[0].DirectDownload, nil
 }
 
-func (d *Mediafire) calculateSHA256(file *os.File) (string, error) {
-	hasher := sha256.New()
-	if _, err := file.Seek(0, 0); err != nil {
-		return "", err
-	}
-	if _, err := io.Copy(hasher, file); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(hasher.Sum(nil)), nil
-}
-
 func (d *Mediafire) uploadCheck(ctx context.Context, filename string, filesize int64, filehash, folderKey string) (*MediafireCheckResponse, error) {
 
 	actionToken, err := d.getActionToken(ctx)
@@ -427,7 +416,9 @@ func (d *Mediafire) resumableUpload(ctx context.Context, folderKey, uploadKey st
 	req.Header.Set("x-filesize", strconv.FormatInt(totalFileSize, 10))
 	req.Header.Set("x-unit-id", strconv.Itoa(unitID))
 	req.Header.Set("x-unit-size", strconv.FormatInt(int64(len(unitData)), 10))
-	req.Header.Set("x-unit-hash", d.sha256Hex(bytes.NewReader(unitData)))
+	h := sha256.New()
+	h.Write(unitData)
+	req.Header.Set("x-unit-hash", hex.EncodeToString(h.Sum(nil)))
 	req.Header.Set("x-filename", filename)
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.ContentLength = int64(len(unitData))
@@ -589,12 +580,6 @@ func (d *Mediafire) pollUpload(ctx context.Context, key string) (*MediafirePollR
 	}
 
 	return &resp, nil
-}
-
-func (d *Mediafire) sha256Hex(r io.Reader) string {
-	h := sha256.New()
-	io.Copy(h, r)
-	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (d *Mediafire) isUnitUploaded(words []int, unitID int) bool {

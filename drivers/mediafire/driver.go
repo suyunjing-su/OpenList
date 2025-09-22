@@ -8,7 +8,7 @@ Date: 2025-09-11
 D@' 3z K!7 - The King Of Cracking
 
 Modifications by ILoveScratch2<ilovescratch@foxmail.com>
-Date: 2025-09-14
+Date: 2025-09-21
 */
 
 import (
@@ -21,6 +21,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"golang.org/x/time/rate"
 )
@@ -58,13 +59,9 @@ func (d *Mediafire) Init(ctx context.Context) error {
 	if d.Cookie == "" {
 		return fmt.Errorf("Init :: [MediaFire] {critical} missing Cookie")
 	}
-
-	// Initialize rate limiter
 	if d.LimitRate > 0 {
 		d.limiter = rate.NewLimiter(rate.Limit(d.LimitRate), 1)
 	}
-
-	// Test the session token - if it fails, renew it once
 	if _, err := d.getSessionToken(ctx); err != nil {
 		return d.renewToken(ctx)
 	}
@@ -335,20 +332,24 @@ func (d *Mediafire) Remove(ctx context.Context, obj model.Obj) error {
 }
 
 func (d *Mediafire) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
-
-	tempFile, err := file.CacheFullAndWriter(&up, nil)
-	if err != nil {
-		return nil, err
+	fileHash := file.GetHash().GetHash(utils.SHA256)
+	var tempFile model.File
+	var err error
+	if len(fileHash) != utils.SHA256.Width {
+		tempFile, fileHash, err = stream.CacheFullAndHash(file, &up, utils.SHA256)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		tempFile, err = file.CacheFullAndWriter(&up, nil)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	osFile, ok := tempFile.(*os.File)
 	if !ok {
 		return nil, fmt.Errorf("expected *os.File, got %T", tempFile)
-	}
-
-	fileHash, err := d.calculateSHA256(osFile)
-	if err != nil {
-		return nil, err
 	}
 
 	checkResp, err := d.uploadCheck(ctx, file.GetName(), file.GetSize(), fileHash, dstDir.GetID())
