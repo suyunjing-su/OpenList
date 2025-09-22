@@ -77,6 +77,8 @@ func (d *Mediafire) WaitLimit(ctx context.Context) error {
 }
 
 func (d *Mediafire) Drop(ctx context.Context) error {
+	// Clear cached resources
+	d.actionToken = ""
 	return nil
 }
 

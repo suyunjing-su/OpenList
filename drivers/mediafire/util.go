@@ -30,6 +30,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+	"github.com/go-resty/resty/v2"
 )
 
 func (d *Mediafire) getSessionToken(ctx context.Context) (string, error) {
@@ -260,6 +261,15 @@ func (d *Mediafire) fileToObj(f File) *model.ObjThumb {
 	}
 }
 
+func (d *Mediafire) setCommonHeaders(req *resty.Request) {
+	req.SetHeaders(map[string]string{
+		"Cookie":     d.Cookie,
+		"User-Agent": d.userAgent,
+		"Origin":     d.appBase,
+		"Referer":    d.appBase + "/",
+	})
+}
+
 func (d *Mediafire) getForm(endpoint string, query map[string]string, resp interface{}) ([]byte, error) {
 	if d.limiter != nil {
 		if err := d.limiter.Wait(context.Background()); err != nil {
@@ -270,14 +280,7 @@ func (d *Mediafire) getForm(endpoint string, query map[string]string, resp inter
 	req := base.RestyClient.R()
 
 	req.SetQueryParams(query)
-
-	req.SetHeaders(map[string]string{
-		"Cookie": d.Cookie,
-		//"User-Agent": base.UserAgent,
-		"User-Agent": d.userAgent,
-		"Origin":     d.appBase,
-		"Referer":    d.appBase + "/",
-	})
+	d.setCommonHeaders(req)
 
 	// If response OK
 	if resp != nil {
@@ -303,15 +306,8 @@ func (d *Mediafire) postForm(endpoint string, data map[string]string, resp inter
 	req := base.RestyClient.R()
 
 	req.SetFormData(data)
-
-	req.SetHeaders(map[string]string{
-		"Cookie":       d.Cookie,
-		"Content-Type": "application/x-www-form-urlencoded",
-		//"User-Agent": base.UserAgent,
-		"User-Agent": d.userAgent,
-		"Origin":     d.appBase,
-		"Referer":    d.appBase + "/",
-	})
+	req.SetHeader("Content-Type", "application/x-www-form-urlencoded")
+	d.setCommonHeaders(req)
 
 	// If response OK
 	if resp != nil {
