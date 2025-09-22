@@ -14,25 +14,23 @@ Date: 2025-09-14
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
-	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
-	"github.com/OpenListTeam/OpenList/v4/pkg/cron"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+	"golang.org/x/time/rate"
 )
 
 type Mediafire struct {
 	model.Storage
 	Addition
-	cron *cron.Cron
 
 	actionToken string
+	limiter     *rate.Limiter
 
 	appBase    string
 	apiBase    string
@@ -61,19 +59,23 @@ func (d *Mediafire) Init(ctx context.Context) error {
 		return fmt.Errorf("Init :: [MediaFire] {critical} missing Cookie")
 	}
 
-	if _, err := d.getSessionToken(ctx); err != nil {
-
-		d.renewToken(ctx)
-
-		num := rand.Intn(4) + 6
-
-		d.cron = cron.NewCron(time.Minute * time.Duration(num))
-		d.cron.Do(func() {
-			d.renewToken(ctx)
-		})
-
+	// Initialize rate limiter
+	if d.LimitRate > 0 {
+		d.limiter = rate.NewLimiter(rate.Limit(d.LimitRate), 1)
 	}
 
+	// Test the session token - if it fails, renew it once
+	if _, err := d.getSessionToken(ctx); err != nil {
+		return d.renewToken(ctx)
+	}
+
+	return nil
+}
+
+func (d *Mediafire) WaitLimit(ctx context.Context) error {
+	if d.limiter != nil {
+		return d.limiter.Wait(ctx)
+	}
 	return nil
 }
 
@@ -98,7 +100,7 @@ func (d *Mediafire) Link(ctx context.Context, file model.Obj, args model.LinkArg
 		return nil, err
 	}
 
-	res, err := base.NoRedirectClient.R().SetDoNotParseResponse(true).SetContext(ctx).Get(downloadUrl)
+	res, err := base.NoRedirectClient.R().SetDoNotParseResponse(true).SetContext(ctx).Head(downloadUrl)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +120,6 @@ func (d *Mediafire) Link(ctx context.Context, file model.Obj, args model.LinkArg
 			"sec-ch-ua":          []string{d.secChUa},
 			"sec-ch-ua-platform": []string{d.secChUaPlatform},
 			"User-Agent":         []string{d.userAgent},
-			//"User-Agent": []string{base.UserAgent},
 		},
 	}, nil
 }
@@ -333,12 +334,7 @@ func (d *Mediafire) Remove(ctx context.Context, obj model.Obj) error {
 	return nil
 }
 
-func (d *Mediafire) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) error {
-	_, err := d.PutResult(ctx, dstDir, file, up)
-	return err
-}
-
-func (d *Mediafire) PutResult(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
+func (d *Mediafire) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
 
 	tempFile, err := file.CacheFullAndWriter(&up, nil)
 	if err != nil {
@@ -405,31 +401,5 @@ func (d *Mediafire) PutResult(ctx context.Context, dstDir model.Obj, file model.
 		Thumbnail: model.Thumbnail{},
 	}, nil
 }
-
-func (d *Mediafire) GetArchiveMeta(ctx context.Context, obj model.Obj, args model.ArchiveArgs) (model.ArchiveMeta, error) {
-	// TODO get archive file meta-info, return errs.NotImplement to use an internal archive tool, optional
-	return nil, errs.NotImplement
-}
-
-func (d *Mediafire) ListArchive(ctx context.Context, obj model.Obj, args model.ArchiveInnerArgs) ([]model.Obj, error) {
-	// TODO list args.InnerPath in the archive obj, return errs.NotImplement to use an internal archive tool, optional
-	return nil, errs.NotImplement
-}
-
-func (d *Mediafire) Extract(ctx context.Context, obj model.Obj, args model.ArchiveInnerArgs) (*model.Link, error) {
-	// TODO return link of file args.InnerPath in the archive obj, return errs.NotImplement to use an internal archive tool, optional
-	return nil, errs.NotImplement
-}
-
-func (d *Mediafire) ArchiveDecompress(ctx context.Context, srcObj, dstDir model.Obj, args model.ArchiveDecompressArgs) ([]model.Obj, error) {
-	// TODO extract args.InnerPath path in the archive srcObj to the dstDir location, optional
-	// a folder with the same name as the archive file needs to be created to store the extracted results if args.PutIntoNewDir
-	// return errs.NotImplement to use an internal archive tool
-	return nil, errs.NotImplement
-}
-
-//func (d *Mediafire) Other(ctx context.Context, args model.OtherArgs) (interface{}, error) {
-//	return nil, errs.NotSupport
-//}
 
 var _ driver.Driver = (*Mediafire)(nil)

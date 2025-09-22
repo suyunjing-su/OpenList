@@ -8,7 +8,7 @@ Date: 2025-09-11
 D@' 3z K!7 - The King Of Cracking
 
 Modifications by ILoveScratch2<ilovescratch@foxmail.com>
-Date: 2025-09-14
+Date: 2025-09-21
 */
 
 import (
@@ -23,9 +23,10 @@ type Addition struct {
 	SessionToken string `json:"session_token" required:"true" type:"string" help:"Required for MediaFire API"`
 	Cookie       string `json:"cookie" required:"true" type:"string" help:"Required for navigation"`
 
-	OrderBy        string `json:"order_by" type:"select" options:"name,time,size" default:"name"`
-	OrderDirection string `json:"order_direction" type:"select" options:"asc,desc" default:"asc"`
-	ChunkSize      int64  `json:"chunk_size" type:"number" default:"100"`
+	OrderBy        string  `json:"order_by" type:"select" options:"name,time,size" default:"name"`
+	OrderDirection string  `json:"order_direction" type:"select" options:"asc,desc" default:"asc"`
+	ChunkSize      int64   `json:"chunk_size" type:"number" default:"100"`
+	LimitRate      float64 `json:"limit_rate" type:"float" default:"2" help:"limit all api request rate ([limit]r/1s)"`
 }
 
 var config = driver.Config{

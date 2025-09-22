@@ -6,6 +6,9 @@ Author: Da3zKi7<da3zki7@duck.com>
 Date: 2025-09-11
 
 D@' 3z K!7 - The King Of Cracking
+
+Modifications by ILoveScratch2<ilovescratch@foxmail.com>
+Date: 2025-09-21
 */
 
 import (
@@ -30,6 +33,12 @@ import (
 )
 
 func (d *Mediafire) getSessionToken(ctx context.Context) (string, error) {
+	if d.limiter != nil {
+		if err := d.limiter.Wait(ctx); err != nil {
+			return "", fmt.Errorf("rate limit wait failed: %w", err)
+		}
+	}
+
 	tokenURL := d.hostBase + "/application/get_session_token.php"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, nil)
@@ -252,6 +261,12 @@ func (d *Mediafire) fileToObj(f File) *model.ObjThumb {
 }
 
 func (d *Mediafire) getForm(endpoint string, query map[string]string, resp interface{}) ([]byte, error) {
+	if d.limiter != nil {
+		if err := d.limiter.Wait(context.Background()); err != nil {
+			return nil, fmt.Errorf("rate limit wait failed: %w", err)
+		}
+	}
+
 	req := base.RestyClient.R()
 
 	req.SetQueryParams(query)
@@ -279,6 +294,12 @@ func (d *Mediafire) getForm(endpoint string, query map[string]string, resp inter
 }
 
 func (d *Mediafire) postForm(endpoint string, data map[string]string, resp interface{}) ([]byte, error) {
+	if d.limiter != nil {
+		if err := d.limiter.Wait(context.Background()); err != nil {
+			return nil, fmt.Errorf("rate limit wait failed: %w", err)
+		}
+	}
+
 	req := base.RestyClient.R()
 
 	req.SetFormData(data)
@@ -382,6 +403,11 @@ func (d *Mediafire) resumableUpload(ctx context.Context, folderKey, uploadKey st
 	actionToken, err := d.getActionToken(ctx)
 	if err != nil {
 		return "", err
+	}
+	if d.limiter != nil {
+		if err := d.limiter.Wait(ctx); err != nil {
+			return "", fmt.Errorf("rate limit wait failed: %w", err)
+		}
 	}
 
 	url := d.apiBase + "/upload/resumable.php"
