@@ -400,7 +400,8 @@ func (d *Mediafire) resumableUpload(ctx context.Context, folderKey, uploadKey st
 	}
 
 	url := d.apiBase + "/upload/resumable.php"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(unitData))
+	reader := driver.NewLimitedUploadStream(ctx, bytes.NewReader(unitData))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, reader)
 	if err != nil {
 		return "", err
 	}
