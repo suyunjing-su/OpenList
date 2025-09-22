@@ -341,9 +341,9 @@ func (d *Mediafire) Put(ctx context.Context, dstDir model.Obj, file model.FileSt
 			return nil, err
 		}
 	} else {
-		tempFile, err = file.CacheFullAndWriter(&up, nil)
-		if err != nil {
-			return nil, err
+		tempFile = file.GetFile()
+		if tempFile == nil {
+			return nil, fmt.Errorf("hash exists but file not cached?")
 		}
 	}
 
