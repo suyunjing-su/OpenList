@@ -627,11 +627,13 @@ func (d *Mediafire) isUnitUploaded(words []int, unitID int) bool {
 }
 
 func (d *Mediafire) getExistingFileInfo(ctx context.Context, fileHash, filename, folderKey string) (*model.ObjThumb, error) {
-
+	// First try to find by hash directly (most efficient)
 	if fileInfo, err := d.getFileByHash(ctx, fileHash); err == nil && fileInfo != nil {
 		return fileInfo, nil
 	}
 
+	// If hash search fails, search in the target folder
+	// This is a fallback method in case the file exists but hash search doesn't work
 	files, err := d.getFiles(ctx, folderKey)
 	if err != nil {
 		return nil, err

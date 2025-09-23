@@ -351,13 +351,16 @@ func (d *Mediafire) Put(ctx context.Context, dstDir model.Obj, file model.FileSt
 	if checkResp.Response.HashExists == "yes" && checkResp.Response.InAccount == "yes" {
 		up(100.0)
 		existingFile, err := d.getExistingFileInfo(ctx, fileHash, file.GetName(), dstDir.GetID())
-		if err == nil {
+		if err == nil && existingFile != nil {
+			// File exists, return existing file info
 			return &model.Object{
 				ID:   existingFile.GetID(),
 				Name: file.GetName(),
 				Size: file.GetSize(),
 			}, nil
 		}
+		// If getExistingFileInfo fails, log and continue with normal upload
+		// This ensures upload doesn't fail due to search issues
 	}
 
 	var pollKey string
