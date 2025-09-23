@@ -99,7 +99,6 @@ func (d *Mediafire) List(ctx context.Context, dir model.Obj, args model.ListArgs
 
 // Link generates a direct download link for the specified file
 func (d *Mediafire) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
-
 	downloadUrl, err := d.getDirectDownloadLink(ctx, file.GetID())
 	if err != nil {
 		return nil, err
@@ -129,7 +128,7 @@ func (d *Mediafire) Link(ctx context.Context, file model.Obj, args model.LinkArg
 	}, nil
 }
 
-// MakeDir creates a new folder in the specified parent directory  
+// MakeDir creates a new folder in the specified parent directory
 func (d *Mediafire) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) (model.Obj, error) {
 	data := map[string]string{
 		"session_token":   d.SessionToken,
@@ -334,23 +333,13 @@ func (d *Mediafire) Remove(ctx context.Context, obj model.Obj) error {
 // Put uploads a file to the specified directory with support for resumable upload and quick upload
 func (d *Mediafire) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
 	fileHash := file.GetHash().GetHash(utils.SHA256)
-	var tempFile model.File
 	var err error
-	
+
 	// Try to use existing hash first, cache only if necessary
 	if len(fileHash) != utils.SHA256.Width {
-		tempFile, fileHash, err = stream.CacheFullAndHash(file, &up, utils.SHA256)
+		_, fileHash, err = stream.CacheFullAndHash(file, &up, utils.SHA256)
 		if err != nil {
 			return nil, err
-		}
-	} else {
-		tempFile = file.GetFile()
-		if tempFile == nil {
-			// Cache the file if hash exists but file not cached
-			tempFile, _, err = stream.CacheFullAndHash(file, &up, utils.SHA256)
-			if err != nil {
-				return nil, err
-			}
 		}
 	}
 
@@ -377,7 +366,7 @@ func (d *Mediafire) Put(ctx context.Context, dstDir model.Obj, file model.FileSt
 	var pollKey string
 
 	if checkResp.Response.ResumableUpload.AllUnitsReady != "yes" {
-		pollKey, err = d.uploadUnits(ctx, tempFile, checkResp, file.GetName(), fileHash, dstDir.GetID(), up)
+		pollKey, err = d.uploadUnits(ctx, file, checkResp, file.GetName(), fileHash, dstDir.GetID(), up)
 		if err != nil {
 			return nil, err
 		}

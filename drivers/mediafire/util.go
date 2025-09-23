@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +28,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
+	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/go-resty/resty/v2"
 )
@@ -72,7 +72,7 @@ func (d *Mediafire) getSessionToken(ctx context.Context) (string, error) {
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-site")
 	req.Header.Set("User-Agent", d.userAgent)
-	//req.Header.Set("Connection", "keep-alive")
+	// req.Header.Set("Connection", "keep-alive")
 
 	resp, err := base.HttpClient.Do(req)
 	if err != nil {
@@ -85,8 +85,8 @@ func (d *Mediafire) getSessionToken(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	//fmt.Printf("getSessionToken :: Raw response: %s\n", string(body))
-	//fmt.Printf("getSessionToken :: Parsed response: %+v\n", resp)
+	// fmt.Printf("getSessionToken :: Raw response: %s\n", string(body))
+	// fmt.Printf("getSessionToken :: Parsed response: %+v\n", resp)
 
 	var tokenResp struct {
 		Response struct {
@@ -117,7 +117,7 @@ func (d *Mediafire) getSessionToken(ctx context.Context) (string, error) {
 			d.Cookie = strings.Join(cookies, "; ")
 			op.MustSaveDriverStorage(d)
 
-			//fmt.Printf("getSessionToken :: Captured cookies: %s\n", d.Cookie)
+			// fmt.Printf("getSessionToken :: Captured cookies: %s\n", d.Cookie)
 		}
 
 	} else {
@@ -126,7 +126,7 @@ func (d *Mediafire) getSessionToken(ctx context.Context) (string, error) {
 
 	d.SessionToken = tokenResp.Response.SessionToken
 
-	//fmt.Printf("Init :: Obtain Session Token %v", d.SessionToken)
+	// fmt.Printf("Init :: Obtain Session Token %v", d.SessionToken)
 
 	op.MustSaveDriverStorage(d)
 
@@ -146,8 +146,8 @@ func (d *Mediafire) renewToken(_ context.Context) error {
 		return fmt.Errorf("failed to renew token: %w", err)
 	}
 
-	//fmt.Printf("getInfo :: Raw response: %s\n", string(body))
-	//fmt.Printf("getInfo :: Parsed response: %+v\n", resp)
+	// fmt.Printf("getInfo :: Raw response: %s\n", string(body))
+	// fmt.Printf("getInfo :: Parsed response: %+v\n", resp)
 
 	if resp.Response.Result != "Success" {
 		return fmt.Errorf("MediaFire token renewal failed: %s", resp.Response.Result)
@@ -155,7 +155,7 @@ func (d *Mediafire) renewToken(_ context.Context) error {
 
 	d.SessionToken = resp.Response.SessionToken
 
-	//fmt.Printf("Init :: Renew Session Token: %s", resp.Response.Result)
+	// fmt.Printf("Init :: Renew Session Token: %s", resp.Response.Result)
 
 	op.MustSaveDriverStorage(d)
 
@@ -212,7 +212,6 @@ func (d *Mediafire) getFiles(ctx context.Context, folderKey string) ([]File, err
 }
 
 func (d *Mediafire) getFolderContent(ctx context.Context, folderKey string, chunkNumber int) (*FolderContentResponse, error) {
-
 	foldersResp, err := d.getFolderContentByType(ctx, folderKey, "folders", chunkNumber)
 	if err != nil {
 		return nil, err
@@ -269,7 +268,7 @@ func (d *Mediafire) fileToObj(f File) *model.ObjThumb {
 	return &model.ObjThumb{
 		Object: model.Object{
 			ID: f.ID,
-			//Path:     "",
+			// Path:     "",
 			Name:     f.Name,
 			Size:     f.Size,
 			Modified: created,
@@ -372,7 +371,6 @@ func (d *Mediafire) getDirectDownloadLink(ctx context.Context, fileID string) (s
 }
 
 func (d *Mediafire) uploadCheck(ctx context.Context, filename string, filesize int64, filehash, folderKey string) (*MediafireCheckResponse, error) {
-
 	actionToken, err := d.getActionToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get action token: %w", err)
@@ -394,11 +392,11 @@ func (d *Mediafire) uploadCheck(ctx context.Context, filename string, filesize i
 		return nil, err
 	}
 
-	//fmt.Printf("uploadCheck :: Raw response: %s\n", string(body))
-	//fmt.Printf("uploadCheck :: Parsed response: %+v\n", resp)
+	// fmt.Printf("uploadCheck :: Raw response: %s\n", string(body))
+	// fmt.Printf("uploadCheck :: Parsed response: %+v\n", resp)
 
-	//fmt.Printf("uploadCheck :: ResumableUpload section: %+v\n", resp.Response.ResumableUpload)
-	//fmt.Printf("uploadCheck :: Upload key specifically: '%s'\n", resp.Response.ResumableUpload.UploadKey)
+	// fmt.Printf("uploadCheck :: ResumableUpload section: %+v\n", resp.Response.ResumableUpload)
+	// fmt.Printf("uploadCheck :: Upload key specifically: '%s'\n", resp.Response.ResumableUpload.UploadKey)
 
 	if err := checkAPIResult(resp.Response.Result); err != nil {
 		return nil, err
@@ -462,7 +460,7 @@ func (d *Mediafire) resumableUpload(ctx context.Context, folderKey, uploadKey st
 		return "", fmt.Errorf("failed to read response body: %v", err)
 	}
 
-	//fmt.Printf("MediaFire resumable upload response (status %d): %s\n", res.StatusCode, string(body))
+	// fmt.Printf("MediaFire resumable upload response (status %d): %s\n", res.StatusCode, string(body))
 
 	var uploadResp struct {
 		Response struct {
@@ -484,7 +482,7 @@ func (d *Mediafire) resumableUpload(ctx context.Context, folderKey, uploadKey st
 	return uploadResp.Response.Doupload.Key, nil
 }
 
-func (d *Mediafire) uploadUnits(ctx context.Context, file model.File, checkResp *MediafireCheckResponse, filename, fileHash, folderKey string, up driver.UpdateProgress) (string, error) {
+func (d *Mediafire) uploadUnits(ctx context.Context, file model.FileStreamer, checkResp *MediafireCheckResponse, filename, fileHash, folderKey string, up driver.UpdateProgress) (string, error) {
 	unitSize, _ := strconv.ParseInt(checkResp.Response.ResumableUpload.UnitSize, 10, 64)
 	numUnits, _ := strconv.Atoi(checkResp.Response.ResumableUpload.NumberOfUnits)
 	uploadKey := checkResp.Response.ResumableUpload.UploadKey
@@ -497,35 +495,10 @@ func (d *Mediafire) uploadUnits(ctx context.Context, file model.File, checkResp 
 		}
 	}
 
-	// Get file size and check file type once
-	var fileSize int64
-	var isOSFile bool
-	var osFile *os.File
-	
-	if f, ok := file.(*os.File); ok {
-		isOSFile = true
-		osFile = f
-		stat, err := f.Stat()
-		if err != nil {
-			return "", err
-		}
-		fileSize = stat.Size()
-	} else {
-		// For other file types, try to seek to get size
-		if seeker, ok := file.(io.Seeker); ok {
-			currentPos, _ := seeker.Seek(0, io.SeekCurrent)
-			size, err := seeker.Seek(0, io.SeekEnd)
-			if err != nil {
-				return "", err
-			}
-			fileSize = size
-			// Restore position
-			_, _ = seeker.Seek(currentPos, io.SeekStart)
-		} else {
-			return "", fmt.Errorf("unable to determine file size")
-		}
+	ss, err := stream.NewStreamSectionReader(file, int(unitSize), &up)
+	if err != nil {
+		return "", err
 	}
-
 	var finalUploadKey string
 
 	for unitID := 0; unitID < numUnits; unitID++ {
@@ -533,31 +506,40 @@ func (d *Mediafire) uploadUnits(ctx context.Context, file model.File, checkResp 
 			return "", ctx.Err()
 		}
 
+		start := int64(unitID) * unitSize
+		size := unitSize
+		if start+size > file.GetSize() {
+			size = file.GetSize() - start
+		}
+		section, err := ss.GetSectionReader(start, size)
+		if err != nil {
+			return "", err
+		}
+		buf := make([]byte, size)
+		n, err := io.ReadFull(section, buf)
+		if err == nil && int64(n) != size {
+			err = fmt.Errorf("failed to read all data: (expect =%d, actual =%d)", size, n)
+		}
+		if err != nil {
+			return "", fmt.Errorf("failed to skip uploaded unit: %w", err)
+		}
+
 		if d.isUnitUploaded(intWords, unitID) {
-			up(float64(unitID+1) * 100 / float64(numUnits))
 			continue
 		}
 
-		var uploadKeyResult string
-		var err error
-		
-		if isOSFile {
-			uploadKeyResult, err = d.uploadSingleUnitOptimized(ctx, osFile, unitID, unitSize, fileHash, filename, uploadKey, folderKey, fileSize)
-		} else {
-			uploadKeyResult, err = d.uploadSingleUnit(ctx, file, unitID, unitSize, fileHash, filename, uploadKey, folderKey, fileSize)
-		}
+		uploadKeyResult, err := d.resumableUpload(ctx, folderKey, uploadKey, buf, unitID, fileHash, filename, file.GetSize())
 		if err != nil {
 			return "", err
 		}
 
 		finalUploadKey = uploadKeyResult
-		up(float64(unitID+1) * 100 / float64(numUnits))
 	}
 
 	return finalUploadKey, nil
 }
 
-func (d *Mediafire) uploadSingleUnit(ctx context.Context, file model.File, unitID int, unitSize int64, fileHash, filename, uploadKey, folderKey string, fileSize int64) (string, error) {
+/*func (d *Mediafire) uploadSingleUnit(ctx context.Context, file model.FileStreamer, unitID int, unitSize int64, fileHash, filename, uploadKey, folderKey string, fileSize int64) (string, error) {
 	start := int64(unitID) * unitSize
 	size := unitSize
 
@@ -566,46 +548,13 @@ func (d *Mediafire) uploadSingleUnit(ctx context.Context, file model.File, unitI
 	}
 
 	unitData := make([]byte, size)
-	
-	// Read data based on file type
-	if osFile, ok := file.(*os.File); ok {
-		// For os.File, use ReadAt for efficient random access
-		if _, err := osFile.ReadAt(unitData, start); err != nil {
-			return "", err
-		}
-	} else if seeker, ok := file.(io.Seeker); ok {
-		// For other seekable files
-		if _, err := seeker.Seek(start, io.SeekStart); err != nil {
-			return "", err
-		}
-		if _, err := io.ReadFull(file, unitData); err != nil {
-			return "", err
-		}
-	} else {
-		return "", fmt.Errorf("file does not support seeking")
-	}
-
-	return d.resumableUpload(ctx, folderKey, uploadKey, unitData, unitID, fileHash, filename, fileSize)
-}
-
-// uploadSingleUnitOptimized is optimized for os.File type to avoid repeated type assertions
-func (d *Mediafire) uploadSingleUnitOptimized(ctx context.Context, osFile *os.File, unitID int, unitSize int64, fileHash, filename, uploadKey, folderKey string, fileSize int64) (string, error) {
-	start := int64(unitID) * unitSize
-	size := unitSize
-
-	if start+size > fileSize {
-		size = fileSize - start
-	}
-
-	unitData := make([]byte, size)
-	
-	// Use ReadAt for efficient random access with os.File
-	if _, err := osFile.ReadAt(unitData, start); err != nil {
+	_, err := file.Read(unitData)
+	if err != nil {
 		return "", err
 	}
 
 	return d.resumableUpload(ctx, folderKey, uploadKey, unitData, unitID, fileHash, filename, fileSize)
-}
+}*/
 
 func (d *Mediafire) getActionToken(ctx context.Context) (string, error) {
 	if d.actionToken != "" {
@@ -633,13 +582,12 @@ func (d *Mediafire) getActionToken(ctx context.Context) (string, error) {
 }
 
 func (d *Mediafire) pollUpload(ctx context.Context, key string) (*MediafirePollResponse, error) {
-
 	actionToken, err := d.getActionToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get action token: %w", err)
 	}
 
-	//fmt.Printf("Debug Key: %+v\n", key)
+	// fmt.Printf("Debug Key: %+v\n", key)
 
 	query := map[string]string{
 		"key":             key,
@@ -653,10 +601,10 @@ func (d *Mediafire) pollUpload(ctx context.Context, key string) (*MediafirePollR
 		return nil, err
 	}
 
-	//fmt.Printf("pollUpload :: Raw response: %s\n", string(body))
-	//fmt.Printf("pollUpload :: Parsed response: %+v\n", resp)
+	// fmt.Printf("pollUpload :: Raw response: %s\n", string(body))
+	// fmt.Printf("pollUpload :: Parsed response: %+v\n", resp)
 
-	//fmt.Printf("pollUpload :: Debug Result: %+v\n", resp.Response.Result)
+	// fmt.Printf("pollUpload :: Debug Result: %+v\n", resp.Response.Result)
 
 	if err := checkAPIResult(resp.Response.Result); err != nil {
 		return nil, err
