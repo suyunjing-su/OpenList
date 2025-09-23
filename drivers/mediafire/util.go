@@ -323,7 +323,7 @@ func (d *Mediafire) postForm(endpoint string, data map[string]string, resp inter
 	return res.Body(), nil
 }
 
-func (d *Mediafire) getDirectDownloadLink(_ context.Context, fileID string) (string, error) {
+func (d *Mediafire) getDirectDownloadLink(ctx context.Context, fileID string) (string, error) {
 	data := map[string]string{
 		"session_token":   d.SessionToken,
 		"quick_key":       fileID,
@@ -551,8 +551,7 @@ func (d *Mediafire) uploadSingleUnit(ctx context.Context, file model.File, unitI
 	return d.resumableUpload(ctx, folderKey, uploadKey, unitData, unitID, fileHash, filename, fileSize)
 }
 
-func (d *Mediafire) getActionToken(_ context.Context) (string, error) {
-
+func (d *Mediafire) getActionToken(ctx context.Context) (string, error) {
 	if d.actionToken != "" {
 		return d.actionToken, nil
 	}
@@ -639,7 +638,7 @@ func (d *Mediafire) getExistingFileInfo(ctx context.Context, fileHash, filename,
 	return nil, fmt.Errorf("existing file not found")
 }
 
-func (d *Mediafire) getFileByHash(_ context.Context, hash string) (*model.ObjThumb, error) {
+func (d *Mediafire) getFileByHash(ctx context.Context, hash string) (*model.ObjThumb, error) {
 	query := map[string]string{
 		"session_token":   d.SessionToken,
 		"response_format": "json",
