@@ -337,6 +337,8 @@ func (d *Mediafire) Put(ctx context.Context, dstDir model.Obj, file model.FileSt
 	fileHash := file.GetHash().GetHash(utils.SHA256)
 	var tempFile model.File
 	var err error
+	
+	// Try to use existing hash first, cache only if necessary
 	if len(fileHash) != utils.SHA256.Width {
 		tempFile, fileHash, err = stream.CacheFullAndHash(file, &up, utils.SHA256)
 		if err != nil {
@@ -345,13 +347,12 @@ func (d *Mediafire) Put(ctx context.Context, dstDir model.Obj, file model.FileSt
 	} else {
 		tempFile = file.GetFile()
 		if tempFile == nil {
-			return nil, fmt.Errorf("hash exists but file not cached?")
+			// Cache the file if hash exists but file not cached
+			tempFile, _, err = stream.CacheFullAndHash(file, &up, utils.SHA256)
+			if err != nil {
+				return nil, err
+			}
 		}
-	}
-
-	osFile, ok := tempFile.(*os.File)
-	if !ok {
-		return nil, fmt.Errorf("expected *os.File, got %T", tempFile)
 	}
 
 	checkResp, err := d.uploadCheck(ctx, file.GetName(), file.GetSize(), fileHash, dstDir.GetID())
@@ -359,49 +360,40 @@ func (d *Mediafire) Put(ctx context.Context, dstDir model.Obj, file model.FileSt
 		return nil, err
 	}
 
-	if checkResp.Response.ResumableUpload.AllUnitsReady == "yes" {
-		up(100.0)
-	}
-
+	// Quick upload: file already exists in account
 	if checkResp.Response.HashExists == "yes" && checkResp.Response.InAccount == "yes" {
 		up(100.0)
 		existingFile, err := d.getExistingFileInfo(ctx, fileHash, file.GetName(), dstDir.GetID())
 		if err == nil {
-			return existingFile, nil
+			return &model.Object{
+				ID:   existingFile.GetID(),
+				Name: file.GetName(),
+				Size: file.GetSize(),
+			}, nil
 		}
 	}
 
 	var pollKey string
 
 	if checkResp.Response.ResumableUpload.AllUnitsReady != "yes" {
-
-		var err error
-
-		pollKey, err = d.uploadUnits(ctx, osFile, checkResp, file.GetName(), fileHash, dstDir.GetID(), up)
+		pollKey, err = d.uploadUnits(ctx, tempFile, checkResp, file.GetName(), fileHash, dstDir.GetID(), up)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-
 		pollKey = checkResp.Response.ResumableUpload.UploadKey
+		up(100.0)
 	}
-
-	//fmt.Printf("pollKey: %+v\n", pollKey)
 
 	pollResp, err := d.pollUpload(ctx, pollKey)
 	if err != nil {
 		return nil, err
 	}
 
-	quickKey := pollResp.Response.Doupload.QuickKey
-
-	return &model.ObjThumb{
-		Object: model.Object{
-			ID:   quickKey,
-			Name: file.GetName(),
-			Size: file.GetSize(),
-		},
-		Thumbnail: model.Thumbnail{},
+	return &model.Object{
+		ID:   pollResp.Response.Doupload.QuickKey,
+		Name: file.GetName(),
+		Size: file.GetSize(),
 	}, nil
 }
 

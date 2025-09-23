@@ -461,7 +461,7 @@ func (d *Mediafire) resumableUpload(ctx context.Context, folderKey, uploadKey st
 	return uploadResp.Response.Doupload.Key, nil
 }
 
-func (d *Mediafire) uploadUnits(ctx context.Context, file *os.File, checkResp *MediafireCheckResponse, filename, fileHash, folderKey string, up driver.UpdateProgress) (string, error) {
+func (d *Mediafire) uploadUnits(ctx context.Context, file model.File, checkResp *MediafireCheckResponse, filename, fileHash, folderKey string, up driver.UpdateProgress) (string, error) {
 	unitSize, _ := strconv.ParseInt(checkResp.Response.ResumableUpload.UnitSize, 10, 64)
 	numUnits, _ := strconv.Atoi(checkResp.Response.ResumableUpload.NumberOfUnits)
 	uploadKey := checkResp.Response.ResumableUpload.UploadKey
@@ -472,10 +472,33 @@ func (d *Mediafire) uploadUnits(ctx context.Context, file *os.File, checkResp *M
 		intWords[i], _ = strconv.Atoi(word)
 	}
 
+	// Get file size
+	var fileSize int64
+	if osFile, ok := file.(*os.File); ok {
+		stat, err := osFile.Stat()
+		if err != nil {
+			return "", err
+		}
+		fileSize = stat.Size()
+	} else {
+		// For other file types, try to seek to get size
+		if seeker, ok := file.(io.Seeker); ok {
+			currentPos, _ := seeker.Seek(0, io.SeekCurrent)
+			size, err := seeker.Seek(0, io.SeekEnd)
+			if err != nil {
+				return "", err
+			}
+			fileSize = size
+			// Restore position
+			_, _ = seeker.Seek(currentPos, io.SeekStart)
+		} else {
+			return "", fmt.Errorf("unable to determine file size")
+		}
+	}
+
 	var finalUploadKey string
 
 	for unitID := 0; unitID < numUnits; unitID++ {
-
 		if utils.IsCanceled(ctx) {
 			return "", ctx.Err()
 		}
@@ -485,36 +508,44 @@ func (d *Mediafire) uploadUnits(ctx context.Context, file *os.File, checkResp *M
 			continue
 		}
 
-		uploadKey, err := d.uploadSingleUnit(ctx, file, unitID, unitSize, fileHash, filename, uploadKey, folderKey)
+		uploadKey, err := d.uploadSingleUnit(ctx, file, unitID, unitSize, fileHash, filename, uploadKey, folderKey, fileSize)
 		if err != nil {
 			return "", err
 		}
 
 		finalUploadKey = uploadKey
-
 		up(float64(unitID+1) * 100 / float64(numUnits))
 	}
 
 	return finalUploadKey, nil
 }
 
-func (d *Mediafire) uploadSingleUnit(ctx context.Context, file *os.File, unitID int, unitSize int64, fileHash, filename, uploadKey, folderKey string) (string, error) {
+func (d *Mediafire) uploadSingleUnit(ctx context.Context, file model.File, unitID int, unitSize int64, fileHash, filename, uploadKey, folderKey string, fileSize int64) (string, error) {
 	start := int64(unitID) * unitSize
 	size := unitSize
-
-	stat, err := file.Stat()
-	if err != nil {
-		return "", err
-	}
-	fileSize := stat.Size()
 
 	if start+size > fileSize {
 		size = fileSize - start
 	}
 
 	unitData := make([]byte, size)
-	if _, err := file.ReadAt(unitData, start); err != nil {
-		return "", err
+	
+	// Read data based on file type
+	if osFile, ok := file.(*os.File); ok {
+		// For os.File, use ReadAt for efficient random access
+		if _, err := osFile.ReadAt(unitData, start); err != nil {
+			return "", err
+		}
+	} else if seeker, ok := file.(io.Seeker); ok {
+		// For other seekable files
+		if _, err := seeker.Seek(start, io.SeekStart); err != nil {
+			return "", err
+		}
+		if _, err := io.ReadFull(file, unitData); err != nil {
+			return "", err
+		}
+	} else {
+		return "", fmt.Errorf("file does not support seeking")
 	}
 
 	return d.resumableUpload(ctx, folderKey, uploadKey, unitData, unitID, fileHash, filename, fileSize)
