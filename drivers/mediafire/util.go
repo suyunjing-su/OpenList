@@ -33,6 +33,14 @@ import (
 	"github.com/go-resty/resty/v2"
 )
 
+// checkAPIResult validates MediaFire API response result and returns error if not successful
+func checkAPIResult(result string) error {
+	if result != "Success" {
+		return fmt.Errorf("MediaFire API error: %s", result)
+	}
+	return nil
+}
+
 func (d *Mediafire) getSessionToken(ctx context.Context) (string, error) {
 	if d.limiter != nil {
 		if err := d.limiter.Wait(ctx); err != nil {
@@ -230,8 +238,8 @@ func (d *Mediafire) getFolderContentByType(_ context.Context, folderKey, content
 		return nil, err
 	}
 
-	if resp.Response.Result != "Success" {
-		return nil, fmt.Errorf("MediaFire API error: %s", resp.Response.Result)
+	if err := checkAPIResult(resp.Response.Result); err != nil {
+		return nil, err
 	}
 
 	return &resp, nil
@@ -337,8 +345,8 @@ func (d *Mediafire) getDirectDownloadLink(ctx context.Context, fileID string) (s
 		return "", err
 	}
 
-	if resp.Response.Result != "Success" {
-		return "", fmt.Errorf("MediaFire API error: %s", resp.Response.Result)
+	if err := checkAPIResult(resp.Response.Result); err != nil {
+		return "", err
 	}
 
 	if len(resp.Response.Links) == 0 {
@@ -377,8 +385,8 @@ func (d *Mediafire) uploadCheck(ctx context.Context, filename string, filesize i
 	//fmt.Printf("uploadCheck :: ResumableUpload section: %+v\n", resp.Response.ResumableUpload)
 	//fmt.Printf("uploadCheck :: Upload key specifically: '%s'\n", resp.Response.ResumableUpload.UploadKey)
 
-	if resp.Response.Result != "Success" {
-		return nil, fmt.Errorf("MediaFire upload check failed: %s", resp.Response.Result)
+	if err := checkAPIResult(resp.Response.Result); err != nil {
+		return nil, err
 	}
 
 	return &resp, nil
@@ -602,8 +610,8 @@ func (d *Mediafire) pollUpload(ctx context.Context, key string) (*MediafirePollR
 
 	//fmt.Printf("pollUpload :: Debug Result: %+v\n", resp.Response.Result)
 
-	if resp.Response.Result != "Success" {
-		return nil, fmt.Errorf("MediaFire poll upload failed: %s", resp.Response.Result)
+	if err := checkAPIResult(resp.Response.Result); err != nil {
+		return nil, err
 	}
 
 	return &resp, nil

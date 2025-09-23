@@ -137,8 +137,8 @@ func (d *Mediafire) MakeDir(ctx context.Context, parentDir model.Obj, dirName st
 		return nil, err
 	}
 
-	if resp.Response.Result != "Success" {
-		return nil, fmt.Errorf("MediaFire API error: %s", resp.Response.Result)
+	if err := checkAPIResult(resp.Response.Result); err != nil {
+		return nil, err
 	}
 
 	created, _ := time.Parse("2006-01-02T15:04:05Z", resp.Response.CreatedUTC)
@@ -183,8 +183,8 @@ func (d *Mediafire) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.O
 		return nil, err
 	}
 
-	if resp.Response.Result != "Success" {
-		return nil, fmt.Errorf("MediaFire API error: %s", resp.Response.Result)
+	if err := checkAPIResult(resp.Response.Result); err != nil {
+		return nil, err
 	}
 
 	return srcObj, nil
@@ -220,8 +220,8 @@ func (d *Mediafire) Rename(ctx context.Context, srcObj model.Obj, newName string
 		return nil, err
 	}
 
-	if resp.Response.Result != "Success" {
-		return nil, fmt.Errorf("MediaFire API error: %s", resp.Response.Result)
+	if err := checkAPIResult(resp.Response.Result); err != nil {
+		return nil, err
 	}
 
 	return &model.Object{
@@ -264,8 +264,8 @@ func (d *Mediafire) Copy(ctx context.Context, srcObj, dstDir model.Obj) (model.O
 		return nil, err
 	}
 
-	if resp.Response.Result != "Success" {
-		return nil, fmt.Errorf("MediaFire API error: %s", resp.Response.Result)
+	if err := checkAPIResult(resp.Response.Result); err != nil {
+		return nil, err
 	}
 
 	var newID string
@@ -317,11 +317,7 @@ func (d *Mediafire) Remove(ctx context.Context, obj model.Obj) error {
 		return err
 	}
 
-	if resp.Response.Result != "Success" {
-		return fmt.Errorf("MediaFire API error: %s", resp.Response.Result)
-	}
-
-	return nil
+	return checkAPIResult(resp.Response.Result)
 }
 
 func (d *Mediafire) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
