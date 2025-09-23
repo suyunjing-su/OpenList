@@ -15,7 +15,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
@@ -360,7 +359,6 @@ func (d *Mediafire) Put(ctx context.Context, dstDir model.Obj, file model.FileSt
 		return nil, err
 	}
 
-	// Quick upload: file already exists in account
 	if checkResp.Response.HashExists == "yes" && checkResp.Response.InAccount == "yes" {
 		up(100.0)
 		existingFile, err := d.getExistingFileInfo(ctx, fileHash, file.GetName(), dstDir.GetID())

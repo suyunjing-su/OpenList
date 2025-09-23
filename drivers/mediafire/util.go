@@ -163,7 +163,8 @@ func (d *Mediafire) renewToken(_ context.Context) error {
 }
 
 func (d *Mediafire) getFiles(ctx context.Context, folderKey string) ([]File, error) {
-	files := make([]File, 0)
+	// Pre-allocate slice with reasonable capacity to reduce memory allocations
+	files := make([]File, 0, d.ChunkSize*2) // Estimate: ChunkSize for files + folders
 	hasMore := true
 	chunkNumber := 1
 
@@ -171,6 +172,15 @@ func (d *Mediafire) getFiles(ctx context.Context, folderKey string) ([]File, err
 		resp, err := d.getFolderContent(ctx, folderKey, chunkNumber)
 		if err != nil {
 			return nil, err
+		}
+
+		// Process folders and files in single loop to improve cache locality
+		totalItems := len(resp.Folders) + len(resp.Files)
+		if cap(files)-len(files) < totalItems {
+			// Grow slice if needed
+			newFiles := make([]File, len(files), len(files)+totalItems+int(d.ChunkSize))
+			copy(newFiles, files)
+			files = newFiles
 		}
 
 		for _, folder := range resp.Folders {
@@ -480,15 +490,22 @@ func (d *Mediafire) uploadUnits(ctx context.Context, file model.File, checkResp 
 	uploadKey := checkResp.Response.ResumableUpload.UploadKey
 
 	stringWords := checkResp.Response.ResumableUpload.Bitmap.Words
-	intWords := make([]int, len(stringWords))
-	for i, word := range stringWords {
-		intWords[i], _ = strconv.Atoi(word)
+	intWords := make([]int, 0, len(stringWords)) // Pre-allocate with capacity
+	for _, word := range stringWords {
+		if intWord, err := strconv.Atoi(word); err == nil {
+			intWords = append(intWords, intWord)
+		}
 	}
 
-	// Get file size
+	// Get file size and check file type once
 	var fileSize int64
-	if osFile, ok := file.(*os.File); ok {
-		stat, err := osFile.Stat()
+	var isOSFile bool
+	var osFile *os.File
+	
+	if f, ok := file.(*os.File); ok {
+		isOSFile = true
+		osFile = f
+		stat, err := f.Stat()
 		if err != nil {
 			return "", err
 		}
@@ -521,12 +538,19 @@ func (d *Mediafire) uploadUnits(ctx context.Context, file model.File, checkResp 
 			continue
 		}
 
-		uploadKey, err := d.uploadSingleUnit(ctx, file, unitID, unitSize, fileHash, filename, uploadKey, folderKey, fileSize)
+		var uploadKeyResult string
+		var err error
+		
+		if isOSFile {
+			uploadKeyResult, err = d.uploadSingleUnitOptimized(ctx, osFile, unitID, unitSize, fileHash, filename, uploadKey, folderKey, fileSize)
+		} else {
+			uploadKeyResult, err = d.uploadSingleUnit(ctx, file, unitID, unitSize, fileHash, filename, uploadKey, folderKey, fileSize)
+		}
 		if err != nil {
 			return "", err
 		}
 
-		finalUploadKey = uploadKey
+		finalUploadKey = uploadKeyResult
 		up(float64(unitID+1) * 100 / float64(numUnits))
 	}
 
@@ -559,6 +583,25 @@ func (d *Mediafire) uploadSingleUnit(ctx context.Context, file model.File, unitI
 		}
 	} else {
 		return "", fmt.Errorf("file does not support seeking")
+	}
+
+	return d.resumableUpload(ctx, folderKey, uploadKey, unitData, unitID, fileHash, filename, fileSize)
+}
+
+// uploadSingleUnitOptimized is optimized for os.File type to avoid repeated type assertions
+func (d *Mediafire) uploadSingleUnitOptimized(ctx context.Context, osFile *os.File, unitID int, unitSize int64, fileHash, filename, uploadKey, folderKey string, fileSize int64) (string, error) {
+	start := int64(unitID) * unitSize
+	size := unitSize
+
+	if start+size > fileSize {
+		size = fileSize - start
+	}
+
+	unitData := make([]byte, size)
+	
+	// Use ReadAt for efficient random access with os.File
+	if _, err := osFile.ReadAt(unitData, start); err != nil {
+		return "", err
 	}
 
 	return d.resumableUpload(ctx, folderKey, uploadKey, unitData, unitID, fileHash, filename, fileSize)
