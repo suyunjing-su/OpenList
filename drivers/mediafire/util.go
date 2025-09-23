@@ -278,7 +278,8 @@ func (d *Mediafire) setCommonHeaders(req *resty.Request) {
 	})
 }
 
-func (d *Mediafire) getForm(endpoint string, query map[string]string, resp interface{}) ([]byte, error) {
+// apiRequest performs HTTP request to MediaFire API with rate limiting and common headers
+func (d *Mediafire) apiRequest(method, endpoint string, queryParams, formData map[string]string, resp interface{}) ([]byte, error) {
 	if d.limiter != nil {
 		if err := d.limiter.Wait(context.Background()); err != nil {
 			return nil, fmt.Errorf("rate limit wait failed: %w", err)
@@ -286,17 +287,37 @@ func (d *Mediafire) getForm(endpoint string, query map[string]string, resp inter
 	}
 
 	req := base.RestyClient.R()
-
-	req.SetQueryParams(query)
 	d.setCommonHeaders(req)
 
-	// If response OK
+	// Set query parameters for GET requests
+	if queryParams != nil {
+		req.SetQueryParams(queryParams)
+	}
+
+	// Set form data for POST requests
+	if formData != nil {
+		req.SetFormData(formData)
+		req.SetHeader("Content-Type", "application/x-www-form-urlencoded")
+	}
+
+	// Set response object if provided
 	if resp != nil {
 		req.SetResult(resp)
 	}
 
-	// Targets MediaFire API
-	res, err := req.Get(d.apiBase + endpoint)
+	var res *resty.Response
+	var err error
+
+	// Execute request based on method
+	switch method {
+	case "GET":
+		res, err = req.Get(d.apiBase + endpoint)
+	case "POST":
+		res, err = req.Post(d.apiBase + endpoint)
+	default:
+		return nil, fmt.Errorf("unsupported HTTP method: %s", method)
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -304,31 +325,12 @@ func (d *Mediafire) getForm(endpoint string, query map[string]string, resp inter
 	return res.Body(), nil
 }
 
+func (d *Mediafire) getForm(endpoint string, query map[string]string, resp interface{}) ([]byte, error) {
+	return d.apiRequest("GET", endpoint, query, nil, resp)
+}
+
 func (d *Mediafire) postForm(endpoint string, data map[string]string, resp interface{}) ([]byte, error) {
-	if d.limiter != nil {
-		if err := d.limiter.Wait(context.Background()); err != nil {
-			return nil, fmt.Errorf("rate limit wait failed: %w", err)
-		}
-	}
-
-	req := base.RestyClient.R()
-
-	req.SetFormData(data)
-	req.SetHeader("Content-Type", "application/x-www-form-urlencoded")
-	d.setCommonHeaders(req)
-
-	// If response OK
-	if resp != nil {
-		req.SetResult(resp)
-	}
-
-	// Targets MediaFire API
-	res, err := req.Post(d.apiBase + endpoint)
-	if err != nil {
-		return nil, err
-	}
-
-	return res.Body(), nil
+	return d.apiRequest("POST", endpoint, nil, data, resp)
 }
 
 func (d *Mediafire) getDirectDownloadLink(ctx context.Context, fileID string) (string, error) {
