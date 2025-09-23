@@ -41,6 +41,7 @@ func checkAPIResult(result string) error {
 	return nil
 }
 
+// getSessionToken retrieves and validates session token from MediaFire
 func (d *Mediafire) getSessionToken(ctx context.Context) (string, error) {
 	if d.limiter != nil {
 		if err := d.limiter.Wait(ctx); err != nil {
@@ -132,6 +133,7 @@ func (d *Mediafire) getSessionToken(ctx context.Context) (string, error) {
 	return d.SessionToken, nil
 }
 
+// renewToken refreshes the current session token when expired
 func (d *Mediafire) renewToken(_ context.Context) error {
 	query := map[string]string{
 		"session_token":   d.SessionToken,
@@ -245,6 +247,7 @@ func (d *Mediafire) getFolderContentByType(_ context.Context, folderKey, content
 	return &resp, nil
 }
 
+// fileToObj converts MediaFire file data to model.ObjThumb with thumbnail support
 func (d *Mediafire) fileToObj(f File) *model.ObjThumb {
 	created, _ := time.Parse("2006-01-02T15:04:05Z", f.CreatedUTC)
 
