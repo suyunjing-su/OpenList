@@ -143,16 +143,13 @@ func (d *Mediafire) MakeDir(ctx context.Context, parentDir model.Obj, dirName st
 
 	created, _ := time.Parse("2006-01-02T15:04:05Z", resp.Response.CreatedUTC)
 
-	return &model.ObjThumb{
-		Object: model.Object{
-			ID:       resp.Response.FolderKey,
-			Name:     resp.Response.Name,
-			Size:     0,
-			Modified: created,
-			Ctime:    created,
-			IsFolder: true,
-		},
-		Thumbnail: model.Thumbnail{},
+	return &model.Object{
+		ID:       resp.Response.FolderKey,
+		Name:     resp.Response.Name,
+		Size:     0,
+		Modified: created,
+		Ctime:    created,
+		IsFolder: true,
 	}, nil
 }
 
@@ -227,16 +224,13 @@ func (d *Mediafire) Rename(ctx context.Context, srcObj model.Obj, newName string
 		return nil, fmt.Errorf("MediaFire API error: %s", resp.Response.Result)
 	}
 
-	return &model.ObjThumb{
-		Object: model.Object{
-			ID:       srcObj.GetID(),
-			Name:     newName,
-			Size:     srcObj.GetSize(),
-			Modified: srcObj.ModTime(),
-			Ctime:    srcObj.CreateTime(),
-			IsFolder: srcObj.IsDir(),
-		},
-		Thumbnail: model.Thumbnail{},
+	return &model.Object{
+		ID:       srcObj.GetID(),
+		Name:     newName,
+		Size:     srcObj.GetSize(),
+		Modified: srcObj.ModTime(),
+		Ctime:    srcObj.CreateTime(),
+		IsFolder: srcObj.IsDir(),
 	}, nil
 }
 
@@ -285,16 +279,13 @@ func (d *Mediafire) Copy(ctx context.Context, srcObj, dstDir model.Obj) (model.O
 		}
 	}
 
-	return &model.ObjThumb{
-		Object: model.Object{
-			ID:       newID,
-			Name:     srcObj.GetName(),
-			Size:     srcObj.GetSize(),
-			Modified: srcObj.ModTime(),
-			Ctime:    srcObj.CreateTime(),
-			IsFolder: srcObj.IsDir(),
-		},
-		Thumbnail: model.Thumbnail{},
+	return &model.Object{
+		ID:       newID,
+		Name:     srcObj.GetName(),
+		Size:     srcObj.GetSize(),
+		Modified: srcObj.ModTime(),
+		Ctime:    srcObj.CreateTime(),
+		IsFolder: srcObj.IsDir(),
 	}, nil
 }
 
