@@ -147,7 +147,7 @@ func (d *Mediafire) MakeDir(ctx context.Context, parentDir model.Obj, dirName st
 	}
 
 	var resp MediafireFolderCreateResponse
-	_, err := d.postForm("/folder/create.php", data, &resp)
+	_, err := d.postForm(ctx, "/folder/create.php", data, &resp)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +197,7 @@ func (d *Mediafire) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.O
 	}
 
 	var resp MediafireMoveResponse
-	_, err := d.postForm(endpoint, data, &resp)
+	_, err := d.postForm(ctx, endpoint, data, &resp)
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +238,7 @@ func (d *Mediafire) Rename(ctx context.Context, srcObj model.Obj, newName string
 	}
 
 	var resp MediafireRenameResponse
-	_, err := d.postForm(endpoint, data, &resp)
+	_, err := d.postForm(ctx, endpoint, data, &resp)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +286,7 @@ func (d *Mediafire) Copy(ctx context.Context, srcObj, dstDir model.Obj) (model.O
 	}
 
 	var resp MediafireCopyResponse
-	_, err := d.postForm(endpoint, data, &resp)
+	_, err := d.postForm(ctx, endpoint, data, &resp)
 	if err != nil {
 		return nil, err
 	}
@@ -343,7 +343,7 @@ func (d *Mediafire) Remove(ctx context.Context, obj model.Obj) error {
 	}
 
 	var resp MediafireRemoveResponse
-	_, err := d.postForm(endpoint, data, &resp)
+	_, err := d.postForm(ctx, endpoint, data, &resp)
 	if err != nil {
 		return err
 	}

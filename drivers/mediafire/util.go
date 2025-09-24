@@ -134,14 +134,14 @@ func (d *Mediafire) getSessionToken(ctx context.Context) (string, error) {
 }
 
 // renewToken refreshes the current session token when expired
-func (d *Mediafire) renewToken(_ context.Context) error {
+func (d *Mediafire) renewToken(ctx context.Context) error {
 	query := map[string]string{
 		"session_token":   d.SessionToken,
 		"response_format": "json",
 	}
 
 	var resp MediafireRenewTokenResponse
-	_, err := d.postForm("/user/renew_session_token.php", query, &resp)
+	_, err := d.postForm(ctx, "/user/renew_session_token.php", query, &resp)
 	if err != nil {
 		return fmt.Errorf("failed to renew token: %w", err)
 	}
@@ -229,7 +229,7 @@ func (d *Mediafire) getFolderContent(ctx context.Context, folderKey string, chun
 	}, nil
 }
 
-func (d *Mediafire) getFolderContentByType(_ context.Context, folderKey, contentType string, chunkNumber int) (*MediafireResponse, error) {
+func (d *Mediafire) getFolderContentByType(ctx context.Context, folderKey, contentType string, chunkNumber int) (*MediafireResponse, error) {
 	data := map[string]string{
 		"session_token":   d.SessionToken,
 		"response_format": "json",
@@ -244,7 +244,7 @@ func (d *Mediafire) getFolderContentByType(_ context.Context, folderKey, content
 	}
 
 	var resp MediafireResponse
-	_, err := d.postForm("/folder/get_content.php", data, &resp)
+	_, err := d.postForm(ctx, "/folder/get_content.php", data, &resp)
 	if err != nil {
 		return nil, err
 	}
@@ -291,9 +291,9 @@ func (d *Mediafire) setCommonHeaders(req *resty.Request) {
 }
 
 // apiRequest performs HTTP request to MediaFire API with rate limiting and common headers
-func (d *Mediafire) apiRequest(method, endpoint string, queryParams, formData map[string]string, resp interface{}) ([]byte, error) {
+func (d *Mediafire) apiRequest(ctx context.Context, method, endpoint string, queryParams, formData map[string]string, resp interface{}) ([]byte, error) {
 	if d.limiter != nil {
-		if err := d.limiter.Wait(context.Background()); err != nil {
+		if err := d.limiter.Wait(ctx); err != nil {
 			return nil, fmt.Errorf("rate limit wait failed: %w", err)
 		}
 	}
@@ -337,12 +337,12 @@ func (d *Mediafire) apiRequest(method, endpoint string, queryParams, formData ma
 	return res.Body(), nil
 }
 
-func (d *Mediafire) getForm(endpoint string, query map[string]string, resp interface{}) ([]byte, error) {
-	return d.apiRequest("GET", endpoint, query, nil, resp)
+func (d *Mediafire) getForm(ctx context.Context, endpoint string, query map[string]string, resp interface{}) ([]byte, error) {
+	return d.apiRequest(ctx, "GET", endpoint, query, nil, resp)
 }
 
-func (d *Mediafire) postForm(endpoint string, data map[string]string, resp interface{}) ([]byte, error) {
-	return d.apiRequest("POST", endpoint, nil, data, resp)
+func (d *Mediafire) postForm(ctx context.Context, endpoint string, data map[string]string, resp interface{}) ([]byte, error) {
+	return d.apiRequest(ctx, "POST", endpoint, nil, data, resp)
 }
 
 func (d *Mediafire) getDirectDownloadLink(ctx context.Context, fileID string) (string, error) {
@@ -354,7 +354,7 @@ func (d *Mediafire) getDirectDownloadLink(ctx context.Context, fileID string) (s
 	}
 
 	var resp MediafireDirectDownloadResponse
-	_, err := d.getForm("/file/get_links.php", data, &resp)
+	_, err := d.getForm(ctx, "/file/get_links.php", data, &resp)
 	if err != nil {
 		return "", err
 	}
@@ -387,7 +387,7 @@ func (d *Mediafire) uploadCheck(ctx context.Context, filename string, filesize i
 	}
 
 	var resp MediafireCheckResponse
-	_, err = d.postForm("/upload/check.php", query, &resp)
+	_, err = d.postForm(ctx, "/upload/check.php", query, &resp)
 	if err != nil {
 		return nil, err
 	}
@@ -569,7 +569,7 @@ func (d *Mediafire) getActionToken(ctx context.Context) (string, error) {
 	}
 
 	var resp MediafireActionTokenResponse
-	_, err := d.postForm("/user/get_action_token.php", data, &resp)
+	_, err := d.postForm(ctx, "/user/get_action_token.php", data, &resp)
 	if err != nil {
 		return "", err
 	}
@@ -596,7 +596,7 @@ func (d *Mediafire) pollUpload(ctx context.Context, key string) (*MediafirePollR
 	}
 
 	var resp MediafirePollResponse
-	_, err = d.postForm("/upload/poll_upload.php", query, &resp)
+	_, err = d.postForm(ctx, "/upload/poll_upload.php", query, &resp)
 	if err != nil {
 		return nil, err
 	}
@@ -652,7 +652,7 @@ func (d *Mediafire) getFileByHash(ctx context.Context, hash string) (*model.ObjT
 	}
 
 	var resp MediafireFileSearchResponse
-	_, err := d.postForm("/file/get_info.php", query, &resp)
+	_, err := d.postForm(ctx, "/file/get_info.php", query, &resp)
 	if err != nil {
 		return nil, err
 	}
